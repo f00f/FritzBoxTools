@@ -504,7 +504,11 @@ if(isset($_SERVER['argv']) and count($_SERVER['argv']) > 0) {	## CLI-Modus ##
         $file = false;
         $mode[5] = true;
        }
-	   echo out(cfgexport($file,$pass,@$mode[5]));
+	   $ret = cfgexport($file,$pass,@$mode[5]);
+	   if (true === $ret) {
+		   $ret = ""; // no output on success
+	   }
+	   echo out($ret);
       }
       elseif($mode[2] and $file and is_file($file))
        cfgimport($file,$pass,$mode[3]);
