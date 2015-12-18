@@ -498,13 +498,13 @@ if(isset($_SERVER['argv']) and count($_SERVER['argv']) > 0) {	## CLI-Modus ##
     $pass = ($pset < $pmax) ? $_SERVER['argv'][$pset++] : false;
     if(($mode[2] or $mode[4] or $mode[5])) {
      if($sid = $cfg['sid'] = login()) {
-      if($mode[4] or $mode[5]) {			// Export & Extrakt
+      if(@$mode[4] or @$mode[5]) {			// Export & Extrakt
        if(is_dir($file)) {	// Current-Dir setzen
         chdir($file);
         $file = false;
         $mode[5] = true;
        }
-       echo out(cfgexport($file,$pass,$mode[5]));
+	   echo out(cfgexport($file,$pass,@$mode[5]));
       }
       elseif($mode[2] and $file and is_file($file))
        cfgimport($file,$pass,$mode[3]);
