@@ -1,5 +1,5 @@
 #!/usr/bin/php
-<?php $ver = "fb_tools 0.19 (c) 29.01.2017 by Michael Engelke <http://www.mengelke.de>"; #(charset=iso-8859-1 / tabs=8 / lines=lf)
+<?php $ver = "fb_tools 0.20 (c) 20.03.2017 by Michael Engelke <http://www.mengelke.de>"; #(charset=iso-8859-1 / tabs=8 / lines=lf)
 
 if(!isset($cfg)) {					// $cfg schon gesetzt?
  $cfg = array(
@@ -9,7 +9,7 @@ if(!isset($cfg)) {					// $cfg schon gesetzt?
 	'port'	=> 80,			// Fritz!Box HTTP-Port (Normalerweise immer 80)
 	'fiwa'	=> 100,			// Fritz!Box Firmware (Nur Intern)
 	'upnp'	=> 49000,		// Fritz!Box UPnP-Port (Normalerweise immer 49000)
-	'pcre'	=> 16*1024*1024,	// pcre.backtrack_limit
+	'pcre'	=> 64*1024*1024,	// pcre.backtrack_limit
 	'sbuf'	=> 4096,		// TCP/IP Socket-Buffergröße
 	'tout'	=> 30,			// TCP/IP Socket-Timeout
 	'upda'	=> 60*60*24*100,	// Auto-Update-Check Periode (Kein Update-Check: 0)
@@ -21,6 +21,7 @@ if(!isset($cfg)) {					// $cfg schon gesetzt?
 	'help'	=> false,		// Hilfe ausgeben
 	'dbug'	=> false,		// Debuginfos ausgeben
 	'oput'	=> false,		// Ausgaben speichern
+	'zlib'	=> array('mode' => -1),	// ZLib-Funktionen (mode: packlevel)
 #	'error' => array(),		// Fehlerlogs
 #	'preset'=> array(),		// Leere Benutzerkonfiguration
 #	'boxinfo'=>array(),		// Leere Boxinfo Daten
@@ -29,13 +30,10 @@ if(!isset($cfg)) {					// $cfg schon gesetzt?
 }
 if(!function_exists('array_combine')) {			// http://php.net/array_combine
  function array_combine($key,$value) {
-  $array = false;
-  if(is_array($key) and is_array($value) and count($key) == count($value)) {
-   $array = array();
+  if(is_array($key) and is_array($value) and count($key) == count($value))
    while(list($kk,$kv) = each($key) and list($vk,$vv) = each($value))
     $array[$kv] = $vv;
-  }
-  return $array;
+  return ($array) ? $array : false;
  }
 }
 if(!function_exists('utf8_encode')) {			// http://php.net/utf8_encode (Fallback auf 7bit)
@@ -75,27 +73,50 @@ if(!function_exists('file_put_contents')) {		// http://php.net/file_put_contents
 }
 if(!function_exists('gzdecode')) {			// http://php.net/gzdecode (Workaround)
  function gzdecode($data) {
+  global $cfg;
   if($tmp = tempnam(null,'gz') and $fp = fopen($tmp,'w')) {	// Gepackte Daten speichern
    fwrite($fp,$data);
    fclose($fp);
    $data = null;
-   if($fp=gzopen($tmp,'rb')) {					// Daten entpackt lesen
-    while(!gzeof($fp))
-     $data .= gzread($fp,$GLOBALS['cfg']['sbuf']);
-    gzclose($fp);
+   if($fp = $cfg['zlib']['open']($tmp,'rb')) {			// Daten entpackt lesen
+    while(!$cfg['zlib']['eof']($fp))
+     $data .= $cfg['zlib']['read']($fp,$GLOBALS['cfg']['sbuf']);
+    $cfg['zlib']['close']($fp);
    }
    @unlink($tmp);						// Überreste löschen
   }
   return $data;
  }
 }
+function file_read($file) {				// (Gepackte) Datei lesen
+ global $cfg;
+ dbug("Lese File: $file",9);
+ if($file and $fp = $cfg['zlib']['open']($file,'r')) {
+  $data = "";
+  while(!$cfg['zlib']['eof']($fp))
+   $data .= $cfg['zlib']['read']($fp,$cfg['sbuf']);
+  $cfg['zlib']['close']($fp);
+  return $data;
+ }
+ return false;
+}
+function file_write($file,$data) {			// (Gepackte) Datei schreiben
+ global $cfg;
+ if($file and ifset($file,'/\.gz$/i') and $fp = gzopen($file,'w'.$cfg['zlib']['mode'])) {
+  $data = $cfg['zlib']['write']($fp,$data);
+  $cfg['zlib']['close']($fp);
+  return $data;
+ }
+ else
+  return file_put_contents($file,$data);
+}
 function crc_32($str,$file=false) {			// Berechnet die CRC32 Checksume von einen String (Optional von einer Datei)
  return str_pad(sprintf('%X',crc32(($file) ? file_get_contents($str) : $str)),8,0,STR_PAD_LEFT);
 }
-function ifset(&$x,$y=false) {				// Variabeln prüfen
- return (isset($x) and ($x or $x != '')) ? (($y and is_string($x) and $y{0} == '/' and preg_match($y,$x,$z)) ? $z : (($y) ? ((is_array($x)) ? array_search($y,$x) : $x == $y) : ((is_array($x)) ? count($x) : !$y))) : false;
+function ifset(&$x,$y=false) {				// Variabeln prüfen und Optional vergleichen
+ return (isset($x) and ($x or $x != '')) ? (($y and is_string($x) and $y{0} == '/' and preg_match($y,$x,$z)) ? $z : (($y) ? ((is_array($x)) ? (($y{0} == '/') ? preg_grep($y,$x) : array_search($y,$x)) : $x == $y) : ((is_array($x)) ? count($x) : !$y))) : false;
 }
-function array_preg($x,$y,$z=0,$w=array()) {		// Durchsucht einen Array mit Regulären Ausdruck
+function preg_array($x,$y,$z=0,$w=array()) {		// Durchsucht einen Array mit Regulären Ausdruck
  foreach($y as $k => $v)				// $z: 0 -> value / 1 -> key / 2 -> values / 3 -> keys
   if(preg_match($x,($z%2) ? $k : $v))
    if($z/2%2)
@@ -117,19 +138,18 @@ function out($str,$mode=0) {				// Textconvertierung vor der ausgabe (mode: 0 ->
    file_put_contents($cfg['oput'],$str,8);
   if((int)$cfg['wrap'] and !ifset($cfg['char'],'/7bit|(13{2}|utf)7/'))	// Wortumbruch
    $str = wordwrap($str,$cfg['wrap']-1,"\n",true);
-  if(ifset($cfg['char'],'/^(dos|oem|c(odepage|p)?(437|850))$/'))
-   $str = str_replace(array('ä','ö','ü','ß','Ä','Ö','Ü','§',"\n"),array(chr(132),chr(148),chr(129),chr(225),chr(142),chr(153),chr(154),chr(21),"\r\n"),$str);
-  elseif($cfg['char'] == 'utf8')
+  if(ifset($cfg['char'],'/^(dos|oem|c(odepage|p)?(437|850))$/') and preg_match_all('/(\s|.)(\s+|.)/',base64_decode("5IT2lPyB3+HEjtaZ3JqnFQoNCg"),$m))
+   $str = str_replace($m[1],$m[2],$str);
+  elseif(ifset($cfg['char'],'/utf8|c(odepage|p)65001/'))
    $str = utf8_encode($str);
-  elseif($cfg['char'] == 'html')
-   $str = str_replace(array('&','<','>','"',"'",'ä','ö','ü','ß','Ä','Ö','Ü'),
-    array('&amp;','&lt;','&gt;','&quot;',"&#39;",'&auml;','&ouml;','&uuml;','&szlig;','&Auml;','&Ouml;','&Uuml;'),$str);
+  elseif($cfg['char'] == 'html' and preg_match_all('/(.)([\da-z#]+)/','&amp<lt>gt"quot\'#39äaumlöoumlüuumlßszligÄAumlÖOumlÜUuml',$m))
+   $str = str_replace($m[1],preg_replace('/.+/','&$0;',$m[2]),$str);
   elseif(ifset($cfg['char'],'/^\d+$/') and dechex($cfg['char']) == 539
-   and preg_match_all('/([a-z\d])(.)|(.)(..)/i','1I2Z3E4A5S6G7T8B9g0Oa4A4b8B8c<C(e3E3g6G6h#H#i!I!l1L1o0O0q9Q9s5S5t7T7x+X+z2Z2ä4:Ä4:ö0:Ö0:üu:ÜU:ß55§55',$var)
-   and preg_match_all('/(.)(.+)/',implode("\n",$var[0]),$var))
-    $str = strtr($str,array_combine($var[1],$var[2]));
-  elseif(!ifset($cfg['char'],'/^(ansi|(codepage|cp)1252|iso.?8859.?1|ascii)$/i')) /* if($cfg['char'] == '7bit') */
-   $str = str_replace(array('ä','ö','ü','ß','Ä','Ö','Ü','§'),array('ae','oe','ue','ss','Ae','Oe','Ue','SS'),$str);
+   and preg_match_all('/([a-z\d])(.)|(.)(..)/i','1I2Z3E4A5S6G7T8B9g0Oa4A4b8B8c<C(e3E3g6G6h#H#i!I!l1L1o0O0q9Q9s5S5t7T7x+X+z2Z2ä4:Ä4:ö0:Ö0:üu:ÜU:ß55§55',$m)
+   and preg_match_all('/(.)(.+)/',implode("\n",$m[0]),$m))
+    $str = strtr($str,array_combine($m[1],$m[2]));
+  elseif(!ifset($cfg['char'],'/^(ansi|(codepage|cp)1252|iso.?8859.?1|ascii)$/i') and preg_match_all('/(.)(..)/','äaeöoeüueßssÄAeÖOeÜUe§SS',$m))
+   $str = str_replace($m[1],$m[2],$str);
   if((int)$cfg['wrap'] and ifset($cfg['char'],'/7bit|(13{2}|utf)7/'))	// Wortumbruch
    $str = wordwrap($str,$cfg['wrap']-1,"\n",true);
  }
@@ -177,20 +197,24 @@ function dbug($str,$level=0,$mode=4) {			// Debug-Daten ausgeben/speichern (mode
 }
 function errmsg($msg,$name='main') {			// Fehlermeldung(en) Sichern
  global $cfg;
- if($msg)			// Fehlermeldung speichern
+ if($msg) {			// Fehlermeldung speichern
+  dbug("Fehler: $msg notieren",9);
   $cfg['error'][$name][] = trim($msg);
- else				// Fehlermeldung abrufen
+ }
+ else {				// Fehlermeldung abrufen
+  dbug("Fehler: $name suchen",9);
   while(isset($cfg['error'][$name]) and is_array($cfg['error'][$name]))	// Fehlermeldung vorhanden?
    if($val = end($cfg['error'][$name]) and preg_match('/^\w+$/',$val))	// Möglicher Rekusive Fehlermeldung?
     $name = $val;		// Nächste Fehlermeldung suchen
    else
     return $val;		// Fehlermeldung ausgeben
+ }
  return false;			// Funktion fehlgeschlagen
 }
 function makedir($dir,$mode=1) {			// Erstellt ein Verzeichnis und wechselt dorthin
- $dir = preg_replace('/[\\\\\/]$/','',$dir);		// Abschlussshlash entfernen
  if(!$dir or $dir == '.')				// Self-Dir nicht bearbeiten
   return true;
+ $dir = preg_replace('/[\\\\\/]$/','',$dir);		// Abschlussshlash entfernen
  if(strpos($dir,'%') !== false)				// strftime auflösen (Problematische Zeichen werden umgewandelt)
   $dir = strftime($dir);
  $dir = preg_replace('/[<:*|?">]+/','-',$dir);
@@ -213,6 +237,35 @@ function makedir($dir,$mode=1) {			// Erstellt ein Verzeichnis und wechselt dort
  }
  return ($mode) ? false : $dir;
 }
+function tar2array($file) {				// Liest ein Tar-Archiv als Array ein
+ global $cfg;
+ if(file_exists($file) and preg_match($cfg['ptar'],$file) and $fp = $cfg['zlib']['open']($file,'r')) {
+  dbug("Entpacke Tar-Archiv",9);
+  $tar = array();
+  while($meta = $cfg['zlib']['read']($fp,512) and preg_match('/^[^\0]+/',substr($meta,0,100),$name)) {
+   $data = substr_replace($meta,"        ",148,8);
+   for($crc=$a=0; $a < 512; $crc += ord($data{$a++}));
+   if($crc != octdec(substr($meta,148,6)))
+    return errmsg("Defektes Tar-Archiv",__FUNCTION__);
+   if($size = octdec(substr($meta,124,11)))
+    $data = $cfg['zlib']['read']($fp,$size + 512 - $size % 512);
+   if(!$meta{156})
+    $tar[$name[0]] = substr($data,0,$size);
+  }
+  $cfg['zlib']['close']($fp);
+  dbug($tar,9,'8,tar2array-#');
+  return $tar;
+ }
+ return errmsg("TAR-Archiv nicht gefunden oder läßt sich nicht öffnen",__FUNCTION__);
+}
+function data2tar($name,$data='',$time=0) {		// Erstellt ein Tar-Header
+ $data = str_pad($name,100,chr(0))."0100777".chr(0).str_repeat(str_repeat("0",7).chr(0),2).str_pad(decoct(strlen($data)),11,"0",STR_PAD_LEFT).chr(0)
+	.str_pad(decoct($time),11,"0",STR_PAD_LEFT).chr(0)."        0".str_repeat(chr(0),100)."ustar".chr(0)."00".str_repeat(chr(0),247)
+	.$data.str_repeat(chr(0),(512 - strlen($data) % 512) % 512);
+ for($a=$b=0; $a<512; $a++)
+  $b += ord($data[$a]);
+ return substr_replace($data,str_pad(decoct($b),6,"0",STR_PAD_LEFT).chr(0)." ",148,8);
+}
 function request($method,$page='/',$body=false,$head=false,$host=false,$port=false) {	// HTTP-Request durchführen
  global $cfg;
  if(is_array($method))					// Restliche Parameter aus Array holen
@@ -220,6 +273,7 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
  foreach(array('host','port') as $var)			// Host & Port setzen
   if(!$$var)
    $$var = $cfg[$var];
+ dbug("Request: $host:$port$page",9);
  if(!$head)						// Head Initialisieren
   $head = $cfg['head'];
  if($mode = preg_match('/^(\w+)(?:-(.+))?/',$method,$var)) {
@@ -270,7 +324,7 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
   foreach($head as $key => $var)			// Header vorbereiten
    $head[$key] = ucwords($key).": $var";
   $head = "HTTP/1.1\r\n".implode("\r\n",$head)."\r\n";
-  dbug("$method $page".(($cfg['dbug']/(1<<7)%2) ? " $head$body\n\n" : ''),5,'RequestPut');	// Debug Request
+  dbug("$method $page".(($cfg['dbug']/(1<<7)%2) ? " $head$body\n\n" : ''),5,'Request');	// Debug Request
   fputs($fp,"$method $page $head$body");		// Request Absenden
   if($mode == 'putonly')				// Nur Upload durchführen
    return fclose($fp);
@@ -284,23 +338,32 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
       fclose($fp);
       return errmsg("HTTP-Fehler: $var[1] $var[2]",__FUNCTION__);
      }
-     $rp = substr($rp,$pos+4);
-     $file[1] = preg_replace('/(?<=[\\\\\/])$|^\.?$/',(ifset($file[1],'/^[.\\\\\/]*$/')
+     if($rp = substr($rp,$pos+4) or !feof($fp)) {	// Nur weitermachen wenn noch Daten kommen
+      $file[1] = preg_replace('/(?<=[\\\\\/])$|^\.?$/',(ifset($file[1],'/^[.\\\\\/]*$/')
 	and preg_match('/^Content-Disposition:\s*(?:attachment;\s*)?filename=(["\']?)(.*?)\1\s*$/mi',$header,$var))
 	? preg_replace('/[?\\\\\/<*>:"]+/','_',$var[2]) : basename(urldecode($page)),$file[1]);
-     dbug("Downloade '$file[1]'".((preg_match('/Content-Length:\s*(\d+)/',$header,$var)) ? " ".number_format($var[1],0,'.',',')." Bytes" : ""));
-     if($sp = fopen($file[1],'w')) {
-      fputs($sp,$rp);
-      while(!feof($fp) and $var = fread($fp,$cfg['sbuf'])) {
-       fputs($sp,$var);
-       dbug(".",0,10);	// Download-Anzeige
+      dbug("Downloade '$file[1]'".((preg_match('/Content-Length:\s*(\d+)/',$header,$var)) ? " ".number_format($var[1],0,'.',',')." Bytes" : ""));
+      $a = strlen($rp);
+      if($sp = fopen($file[1],'w')) {
+       fputs($sp,$rp);
+       while(!feof($fp) and $var = fread($fp,$cfg['sbuf'])) {
+        fputs($sp,$var);
+        $a += strlen($var);
+        dbug(".",0,10);	// Download-Anzeige
+       }
+       fclose($sp);
+       dbug("\n",0,8);	// Download-Anzeige abschließen
+       $rp = $header;
+       if(!$a) {	// Wurde wirklich was heruntergeladen?
+        unlink($file[1]);
+        return errmsg("Download Fehlgeschlagen: Keine Daten erhalten",__FUNCTION__);
+       }
       }
-      fclose($sp);
-      dbug("\n",0,8);	// Download-Anzeige abschließen
-      $rp = $header;
+      else
+       return errmsg("$file[1] kann nicht zum Schreiben geöffnet werden",__FUNCTION__);
      }
      else
-      return errmsg("$file[1] kann nicht zum Schreiben geöffnet werden",__FUNCTION__);
+      return errmsg("Download abgebrochen: Keine Daten erhalten",__FUNCTION__);
     }
    }
   }
@@ -319,7 +382,7 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
   fclose($fp);
   dbug("\n",6,8);	// Download-Anzeige abschließen
   $fp = $rp;
-  dbug((($cfg['dbug']/(1<<7)%2) ? $rp : preg_replace('/\n.*$/s','',$rp))."\n\n",6,'RequestGet');	// Debug Response
+  dbug((($cfg['dbug']/(1<<7)%2) ? $rp : preg_replace('/\n.*$/s','',$rp))."\n\n",6,'Request');	// Debug Response
   if(preg_match('!^HTTP/[\d.]+ (\d+) (.+)!i',$rp,$var) and $var[1] >= 400)	// Blacklist erkennen
    return errmsg("HTTP-Fehler: $var[1] $var[2]",__FUNCTION__);
   elseif($mode != 'raw' and preg_match('/^(http[^\r\n]+)(.*?)\r\n\r\n(.*)$/is',$rp,$array)) {	// Header vom Body trennen
@@ -342,6 +405,7 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
 }
 function response($xml,$pass,$page=false) {		// Login-Response berechnen
  if(preg_match('!<Challenge>(\w+)</Challenge>!',$xml,$var)) {
+  dbug("Kodiere Kennwort aus Challenge: $var[1]",9);
   $hash = "response=$var[1]-".md5(preg_replace('!.!',"\$0\x00","$var[1]-$pass"));
   if($page and $GLOBALS['cfg']['fiwa'] == 100)
    $GLOBALS['cfg']['fiwa'] = (substr($page,-4) == '.lua') ? '530' : '474';
@@ -406,7 +470,7 @@ function login($pass=false,$user=false) {		// In der Fritz!Box einloggen
  return ($cfg['sid'] = $sid) ? $sid : errmsg("Anmeldung fehlgeschlagen$err".((!ifset($pass,'/^[ -~]+$/')) ?
 	"\nHinweis: Das Login-Kennwort enthält Sonderzeichen, die bei unterschiedlicher Zeichenkodierung Probleme bereiten können" : ""),__FUNCTION__);
 }
-function logout($sid=false) {				// Aus der Fritz!Box ausloggen
+function logout($sid=0) {				// Aus der Fritz!Box ausloggen
  if(!$sid)
   $sid = $GLOBALS['cfg']['sid'];
  dbug("Logout ".$GLOBALS['cfg']['host']);
@@ -414,6 +478,7 @@ function logout($sid=false) {				// Aus der Fritz!Box ausloggen
   request('GET',(($GLOBALS['cfg']['fiwa'] < 529) ? "/cgi-bin/webcm" : "/login_sid.lua"),"security:command/logout=1&logout=1&sid=$sid");
 }
 function supportcode($str = false) {			// Supportcode aufschlüsseln
+ dbug("Enschlüssle Supportcode");
  return ($str or $str = request('GET','/cgi-bin/system_status')) ? ((preg_match('!
 	([^<>]+?)-
 	(\w+)-
@@ -440,17 +505,21 @@ function supportcode($str = false) {			// Supportcode aufschlüsseln
   :	errmsg(($var = ifset($str,'/<title>(.*?)<\/title>/i')) ? "Fehler: $var[1]" : "Unbekannt: $str",__FUNCTION__)) : errmsg('request',__FUNCTION__);
 }
 function upnprequest($page,$ns,$rq,$exp=false) {	// UPnP Request durchführen
+ global $cfg;
+ dbug("Setzte UPnP request ab: $page - $rq",9);
  if($rp = request(array(
-	'method' => 'POST',
+	'method' => 'POST-array',
 	'page' => $page,
 	'body' => utf8_encode("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
 	."<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n"
 	."<s:Body><u:$rq xmlns:u=$ns /></s:Body>\n</s:Envelope>"),
 	'head' => array_merge($GLOBALS['cfg']['head'],array('content-type' => 'text/xml; charset="utf-8"', 'soapaction' =>  "\"$ns#$rq\"")),
 	'port' => $GLOBALS['cfg']['upnp']))) {
+  if($cfg['fiwa'] != 100 and $var = ifset($rp['SERVER'],'/0*([1-9])\.(\d{2})\s*$/'))	// Firmware-Version auslesen
+   $cfg['fiwa'] = intval($var[1].$var[2]);
   if($exp and is_string($exp))				// Nur einen Wert extrahieren
-   return (preg_match("!<$exp>(.*?)</$exp>!",$rp,$var)) ? $var[1] : errmsg('Kein Erwartetes Ergebnis erhalten',__FUNCTION__);
-  elseif(is_array($exp) and preg_match_all('!<(\w+)>(.+?)</\1>!',$rp,$array)) {	// Alle Werte in ein Array packen
+   return (preg_match("!<$exp>(.*?)</$exp>!",$rp[1],$var)) ? $var[1] : errmsg('Kein Erwartetes Ergebnis erhalten',__FUNCTION__);
+  elseif(is_array($exp) and preg_match_all('!<(\w+)>(.+?)</\1>!',$rp[1],$array)) {	// Alle Werte in ein Array packen
    dbug($array,4,'upnprequest');
    foreach($array[1] as $key => $var)			// Ergebnisse zusammenstellen
     $exp[$var] = $array[2][$key];
@@ -463,39 +532,47 @@ function upnprequest($page,$ns,$rq,$exp=false) {	// UPnP Request durchführen
   return errmsg('request',__FUNCTION__);
 }
 function getupnppath($urn) {				// Helper für UPnP-Requests
+ dbug("Ermittle UPnP Pfad: $urn",9);
  return ($rp = request(array('method' => 'GET', 'page' => '/igddesc.xml', 'port' => $GLOBALS['cfg']['upnp']))
 	and preg_match("!<(service)>.*?<(serviceType)>(urn:[^<>]*".$urn."[^<>]*)</\\2>.*?<(controlURL)>(/[^<>]+)</\\4>.*?</\\1>!s",$rp,$var))
 	? array($var[3],$var[5]) : errmsg('request',__FUNCTION__);
 }
 function getexternalip() {				// Externe IPv4-Adresse über UPnP ermitteln
+ global $cfg;
+ dbug("Ermittle IP-Adresse über UPnP");
  $ip = array();
- $k = "X_AVM_DE_Get";
  if($val = getupnppath('WANIPConnection')) {
   if($var = upnprequest($val[1],$val[0],'GetExternalIPAddress','NewExternalIPAddress'))
-   $ip['IPv4'] = $var;
-  if($var = upnprequest($val[1],$val[0],$k.'ExternalIPv6Address','NewExternalIPv6Address'))
-   $ip['IPv6'] = $var;
-  if($var = upnprequest($val[1],$val[0],$k.'IPv6Prefix',array()) and ifset($var['NewIPv6Prefix']))
-   $ip['IPv6-Prefix'] = "$var[NewIPv6Prefix]/$var[NewPrefixLength]";
-  if($var = upnprequest($val[1],$val[0],$k.'DNSServer',array()) and $var = array_preg('/New(IPv4)?DNSServer/',$var,3))
-   $ip['DNSv4'] = implode(", ",$var);
-  if($var = upnprequest($val[1],$val[0],$k.'IPv6DNSServer',array()) and $var = array_preg('/NewIPv6DNSServer/',$var,3))
-   $ip['DNSv6'] = implode(", ",$var);
+    $ip['IPv4'] = $var;
+  if($cfg['fiwa'] <= 550) {				// IPv6 und DNS bei neueren Boxen
+   $k = "X_AVM_DE_Get";
+   if($var = upnprequest($val[1],$val[0],$k.'ExternalIPv6Address','NewExternalIPv6Address'))
+    $ip['IPv6'] = $var;
+   if($var = upnprequest($val[1],$val[0],$k.'IPv6Prefix',array()) and ifset($var['NewIPv6Prefix']))
+    $ip['IPv6-Prefix'] = "$var[NewIPv6Prefix]/$var[NewPrefixLength]";
+   if($var = upnprequest($val[1],$val[0],$k.'DNSServer',array()) and $var = preg_array('/New(IPv4)?DNSServer/',$var,3))
+    $ip['DNSv4'] = implode(", ",$var);
+   if($var = upnprequest($val[1],$val[0],$k.'IPv6DNSServer',array()) and $var = preg_array('/NewIPv6DNSServer/',$var,3))
+    $ip['DNSv6'] = implode(", ",$var);
+  }
   if($ip)
    return $ip;
  }
  return errmsg('request',__FUNCTION__);
 }
 function forcetermination() {				// Internetverbindungen über UPnP neu aufbauen
- return ($val = getupnppath('WANIPConnection') and $var = upnprequest($val[1],$val[0],'ForceTermination','NewExternalIPAddress'))
+ dbug("WAN Neueinwahl über UPnP");
+ return ($val = getupnppath('WANIPConnection') and $var = upnprequest($val[1],$val[0],'ForceTermination'))
   ? $var : errmsg('request',__FUNCTION__);
 }
 function saverpdata($file,$data,$name) {		// HTTP-Downloads in Datei speichern
  $file = preg_replace('/[<>\[\]:\/\\\\"*?|]/','_',($file) ? $file : ((@preg_match('/filename="(.*)"/',$data['Content-Disposition'],$var)) ? $var[1] : $name));
  $cfg['file'] = $file;
+ dbug("Speichere Daten in $file",9);
  return file_put_contents($file,$data[1]);
 }
-function supportdata($file=false,$tm=false,$sid=false) {// Supportdaten anfordern
+function supportdata($file=false,$tm=false,$sid=0) {	// Supportdaten anfordern
+ dbug("Hole Supportdaten");
  if(!$sid)
   $sid = $GLOBALS['cfg']['sid'];
  $array = array();
@@ -509,36 +586,60 @@ function supportdata($file=false,$tm=false,$sid=false) {// Supportdaten anforder
  $data = ($file) ? (bool)request("POST-save:$file",'/cgi-bin/firmwarecfg',$array) : request("POST-array",'/cgi-bin/firmwarecfg',$array);
  return ($data) ? $data : errmsg('request',__FUNCTION__);
 }
-function supportdataextrakt($data,$mode=false) {	// Supportdaten extrahieren
+function supportdataextrakt($data,$mode=0,$file='') {	// Supportdaten extrahieren
+ global $cfg;
  $info = array();
- if($mode == 'sec') {
-  $preg = '/^#{5} +BEGIN +SECTION +(\S+) *([^\r\n]+\s*)?(.*?)#{5} +END +SECTION +\1\s+/sm';
+ if(is_array($mode) and $mode[0] == 'sec') {
+  $preg = '/^#{5} +BEGIN +SECTION +(\S+) *([^\r\n]+\s*)?(.*?)^#{5} +END +SECTION +\1\s+/sim';
   if(preg_match_all($preg,$data,$array)) {
    dbug($array,4,'SupportDataExtrakt-#');
    foreach($array[1] as $key => $var)
     if(trim($array[3][$key]))
-     $info = array_merge($info,(($val = trim(preg_replace($preg,'',$array[3][$key]))) ? array($var => $array[2][$key].$val) : array()),supportdataextrakt($array[3][$key],'sec'));
+     $info = array_merge($info,(($val = trim(preg_replace($preg,'',$array[3][$key]))) ? array($var => $array[2][$key].$val) : array()),supportdataextrakt($array[3][$key],array('sec')));
   }
  }
- elseif(substr($data,0,5) == '#####' and $array = supportdataextrakt($data,'sec')) {
+ elseif(substr($data,0,5) == '#####' and $array = supportdataextrakt($data,array('sec'))) {
+  dbug("Zerlege Supportdaten");
   $mstr = $mlen = array(0,0);
   $val = $list = array();
+  if($mode and $file) {					// Tar-Archiv Initialisieren
+   $fp = ($mode == 1) ? fopen($file,'w') : $cfg['zlib']['open']($file,'w'.$cfg['zlib']['mode']);
+   $date = (preg_match('/^#{5} +TITLE +Datum +(.+)/mi',$data,$var)) ? strtotime($var[1]) : 0;
+  }
   foreach($array as $key => $var) {			// Maximale Längen ermitteln
-   file_put_contents("$key.txt",$var);
+   if($mode == 2 and $fp)
+    $cfg['zlib']['write']($fp,data2tar("$key.txt",$var,$date));
+   elseif($mode == 1 and $fp)
+    fwrite($fp,data2tar("$key.txt",$var,$date));
+   else
+    file_put_contents("$key.txt",$var);
    $len = number_format(strlen($var),0,",",".");
    $list[] = array($key,$len);
    $c = (count($list)-1 < count($array)/2) ? 0 : 1;
    $mstr[$c] = max($mstr[$c],strlen($key));
    $mlen[$c] = max($mlen[$c],strlen($len));
   }
+  if($mode and $fp) {					// Tar-Archiv abschließen
+   $data = str_repeat(chr(0),512);
+   if($mode == 2) {
+    $cfg['zlib']['write']($fp,$data);
+    $cfg['zlib']['close']($fp);
+   }
+   else {
+    fwrite($fp,$data);
+    fclose($fp);
+   }
+  }
   for($a=0;$a<count($list);$a++)			// Liste zusammenstellen
-   if(@$var=$list[(($a-$a%2)/2)+floor(count($list)%2+count($list)/2)*($a%2)])
-    $val[$a-$a%2] = ((isset($val[$a-$a%2])) ? $val[$a-$a%2] : '').str_pad($var[0],$mstr[$a%2]," ")." ".str_pad($var[1],$mlen[$a%2]," ",STR_PAD_LEFT)." Bytes   ";
+   if(@$var = $list[(($a - $a % 2) / 2) + floor(count($list) % 2 + count($list) / 2) * ($a % 2)])
+    $val[$a - $a % 2] = ((isset($val[$a - $a % 2])) ? $val[$a - $a % 2] : '').str_pad($var[0],$mstr[$a % 2]," ")." ".str_pad($var[1],$mlen[$a % 2]," ",STR_PAD_LEFT)." Bytes   ";
   $info = implode("\n",$val);
  }
+ else
+  dbug("Das zerlegen der Supportdaten ist fehlgeschlagen");
  return $info;
 }
-function dial($dial,$port=false,$sid=false) {		// Wahlhilfe
+function dial($dial,$port=false,$sid=0) {		// Wahlhilfe
  if(!$sid)
   $sid = $GLOBALS['cfg']['sid'];
  $sid = (!is_bool($sid)) ? "&sid=$sid" : '';
@@ -561,7 +662,8 @@ function dial($dial,$port=false,$sid=false) {		// Wahlhilfe
  }
  return true;
 }
-function cfgexport($mode,$pass=false,$sid=false) {	// Konfiguration Exportieren (NUR Exportieren)
+function cfgexport($mode,$pass=false,$sid=0) {		// Konfiguration Exportieren (NUR Exportieren)
+ dbug("Exportiere Konfig");
  $body = array('ImportExportPassword' => $pass, 'ConfigExport' => false);
  $path = '/cgi-bin/firmwarecfg';
  if(!$sid) {
@@ -575,31 +677,31 @@ function cfgexport($mode,$pass=false,$sid=false) {	// Konfiguration Exportieren 
 }
 function cfgcalcsum($data) {				// Checksumme für die Konfiguration berechnen
  if(preg_match_all('/^(\w+)=(\S+)\s*$|^(\*{4}) (?:CRYPTED)?(CFG|BIN)FILE:(\S+)\s*(.*?)\3 END OF FILE \3\s*$/sm',$data,$array)) {
+  dbug("Berechne Konfig-Checksumme",9);
   dbug($array,4,'CfgCalcSum-#');
   foreach($array[4] as $key => $var)
-   if($array[1][$key])
-    $array[0][$key] = $array[1][$key].$array[2][$key]."\0";
-   elseif($var == 'CFG')
-    $array[0][$key] = $array[5][$key]."\0".stripcslashes(str_replace("\r",'',substr($array[6][$key],0,-1)));
-   elseif($var == 'BIN')
-    $array[0][$key] = $array[5][$key]."\0".pack('H*',preg_replace('/[^\da-f]+/i','',$array[6][$key]));
+   $array[0][$key] = ($array[1][$key]) ? $array[1][$key].$array[2][$key]."\0"
+	: $array[5][$key]."\0".(($var == 'BIN') ? pack('H*',preg_replace('/[^\da-f]+/i','',$array[6][$key])) : preg_replace('/\r|\\\\(?=\\\\)/','',substr($array[6][$key],0,-1)));
   dbug($array[0],4,'8,CfgCalcSumArray-#');
   dbug(join('',$array[0]),4,'8,CfgCalcSumData');
  }
  return ($array and preg_match('/(?<=^\*{4} END OF EXPORT )[A-Z\d]{8}(?= \*{4}\s*$)/m',$data,$key,PREG_OFFSET_CAPTURE))
 	? array($key[0][0],$var = crc_32(join('',$array[0])),substr_replace($data,$var,$key[0][1],8)) : errmsg('Keine Konfig-Datei',__FUNCTION__);
 }
-function cfgimport($file,$pass=false,$mode=false,$sid=false) {	// Konfiguration importieren (Wird vermutlich bald überarbeitet)
- if($file and (is_file($file) and ($data = file_get_contents($file)) or is_dir($file) and ($data = cfgmake($file)))
-	or !$file and $data = $mode and substr($mode,0,4) == '****') {
+function cfgimport($file,$pass='',$mode=false,$sid=0) {	// Konfiguration importieren (Wird vermutlich bald überarbeitet)
+ global $cfg;
+ if($file and (	is_file($file) and preg_match($cfg['ptar'],$file) and ($data = cfgmake(tar2array($file)))
+		or is_file($file) and ($data = file_read($file))
+		or is_dir($file) and ($data = cfgmake($file))
+	) or !$file and $data = $mode and substr($mode,0,4) == '****') {
   if($mode and $var = cfgcalcsum($data))
    $data = $var[2];
-  dbug("Upload Konfig-File an ".$GLOBALS['cfg']['host']);
+  dbug("Upload Konfig-File an ".$cfg['host']);
   $body = array('ImportExportPassword' => $pass,
 	'ConfigImportFile' => array('filename' => $file, 'Content-Type' => 'application/octet-stream', '' => $data),
 	'apply' => false);
   if(!$sid) {
-   $sid = $GLOBALS['cfg']['sid'];
+   $sid = $cfg['sid'];
    if(!is_bool($sid))
     $body = array_merge(array('sid' => $sid),$body);
   }
@@ -608,7 +710,8 @@ function cfgimport($file,$pass=false,$mode=false,$sid=false) {	// Konfiguration 
  else
   return errmsg('Import-Datei/Ordner nicht gefunden',__FUNCTION__);
 }
-function cfginfo($data,$mode,$text=false) {		// Konfiguration in Einzeldateien sichern
+function cfginfo($data,$mode=0,$file='',$text=false) {	// Konfiguration in Einzeldateien sichern (mode: 0->show, 1->Dir, 2->Tar, 3->tgz)
+ global $cfg;
  if(preg_match_all('/^(?:
 	\*{4}\s(.*?)\sCONFIGURATION\sEXPORT|(\w+=\S+))\s*$		# 1 Fritzbox-Modell, 2 Variablen
 	|^\*{4}\s(?:CRYPTED)?(CFG|BIN)FILE:(\S+)\s*?\r?\n(.*?)\r?\n	# 3 Typ, 4 File, 5 Data
@@ -616,17 +719,22 @@ function cfginfo($data,$mode,$text=false) {		// Konfiguration in Einzeldateien s
   $list = $val = $vars = array();
   $mstr = $mlen = array(0,0);
   dbug($array,4,'CfgInfo-#');
+  $fp = ($mode >= 2 and $file) ? (($mode == 2) ? fopen($file,'w') : $cfg['zlib']['open']($file,'w'.$cfg['zlib']['mode'])) : false;	// tar/tgz initialisieren
   foreach($array[3] as $key => $var)			// Config-Dateien aufteilen
    if($var) {
     if($array[3][$key] == 'CFG') {
-     $bin = str_replace(array("\r","\\\\"),array("","\\"),$array[5][$key]);
+     $bin = preg_replace('/\r|\\\\(?=\\\\)/','',$array[5][$key]);
      if(!isset($vars['Date']) and preg_match('/^\s\*\s([\s:\w]+)$/m',$bin,$var))
       $vars['Date'] = strtotime($var[1]);
     }
     else
      $bin = pack('H*',preg_replace('/[^\da-f]+/i',"",$array[5][$key]));
     $list[] = array($array[3][$key],$array[4][$key],number_format(strlen($bin),0,",","."));
-    if($mode)
+    if($fp and $mode == 3)
+     $cfg['zlib']['write']($fp,data2tar($array[4][$key],$bin,$vars['Date']));
+    elseif($fp and $mode >= 2)
+     fwrite($fp,data2tar($array[4][$key],$bin,$vars['Date']));
+    elseif($mode >= 1)
      file_put_contents($array[4][$key],$bin);
     unset($array[2][$key]);
    }
@@ -634,16 +742,35 @@ function cfginfo($data,$mode,$text=false) {		// Konfiguration in Einzeldateien s
     $vars[$var[1]] = $var[2];
    else
     unset($array[2][$key]);
-  $file = "pattern.txt";				// Konfig-Schablone sichern
+  $name = "index.txt";				// Konfig-Schablone sichern
   $data = preg_replace('/^(\*{4}\s(?:CRYPTED)?(?:CFG|BIN)FILE:\S+\s*?\r?\n).*?\r?\n(^\*{4}\sEND\sOF\sFILE\s\*{4}\s*?)$/msx','$1$2',$data);
-  $list[] = array("TXT",$file,number_format(strlen($data),0,",","."));
-  if($mode)
-   file_put_contents($file,$data);
+  $list[] = array("TXT",$name,number_format(strlen($data),0,",","."));
+  if($fp and $mode == 3)
+   $cfg['zlib']['write']($fp,data2tar($name,$data,$vars['Date']));
+  elseif($fp and $mode >= 2)
+   fwrite($fp,data2tar($name,$data,$vars['Date']));
+  elseif($mode >= 1)
+   file_put_contents($name,$data);
   if($text) {						// Zugangsdaten sichern
-   $file = "zugangsdaten.txt";
-   $list[] = array("TXT",$file,number_format(strlen($text),0,",","."));
-   if($mode)
-    file_put_contents($file,$text);
+   $name = "zugangsdaten.txt";
+   $list[] = array("TXT",$name,number_format(strlen($text),0,",","."));
+   if($fp and $mode == 3)
+    $cfg['zlib']['write']($fp,data2tar($name,$text,$vars['Date']));
+   elseif($fp and $mode >= 2)
+    fwrite($fp,data2tar($name,$text,$vars['Date']));
+   elseif($mode >= 1)
+    file_put_contents($name,$text);
+  }
+  if($fp) {						// tar/tgz finalisieren
+   $data = str_repeat(chr(0),512);
+   if($mode == 3) {
+    $cfg['zlib']['write']($fp,$data);
+    $cfg['zlib']['close']($fp);
+   }
+   elseif($mode == 2) {
+    fwrite($fp,$data);
+    fclose($fp);
+   }
   }
   foreach($list as $key => $var) {			// Maximale Längen ermitteln
    $c = ($key < count($list)/2) ? 0 : 1;
@@ -664,33 +791,39 @@ function cfginfo($data,$mode,$text=false) {		// Konfiguration in Einzeldateien s
  else
   return errmsg('Keine Konfig-Datei',__FUNCTION__);
 }
-function cfgmake($dir,$mode=false,$file=false) {	// Konfiguration wieder zusammensetzen
- if(file_exists("$dir/pattern.txt") and $data = file_get_contents("$dir/pattern.txt") and preg_match('/^\*{4}\s+FRITZ!/m',$data,$array)) {
+function cfgmake($dir,$mode='',$file=false) {		// Konfiguration wieder zusammensetzen
+ if(is_array($dir) and isset($dir[0]) and !$mode and !$file) {		// Helper für Preg_Replace CfgMake
+  if(is_array($GLOBALS['val']) and isset($GLOBALS['val'][$dir[3]]))
+   $mode = $GLOBALS['val'][$dir[3]];
+  elseif(file_exists("$GLOBALS[val]/$dir[3]"))
+   $mode = file_get_contents("$GLOBALS[val]/$dir[3]");
+  return $dir[1].(($dir[2] == 'BIN') ? wordwrap(strtoupper(implode('',unpack('H*',$mode))),80,$dir[4],1) : str_replace("\\","\\\\",$mode)).$dir[4].$dir[5];
+ }
+ elseif($dir and (is_array($dir) and $tar = preg_array('/^(index|pattern)\.txt$/',$dir,1) and ($data = $dir[$tar])
+		or ($var = glob("$dir/{index,pattern}.txt",GLOB_BRACE)) and ($data = file_get_contents($var[0])))
+	and preg_match('/^\*{4}\s+\w+.*CONFIGURATION EXPORT/',$data,$array)) {
+  dbug("Setze Konfig-Daten aus ".((is_array($dir)) ? "TAR" : $dir)." zusammen");
   $GLOBALS['val'] = $dir;
-  $data = preg_replace_callback('/(^\*{4}\s(?:CRYPTED)?(CFG|BIN)FILE:(\S+)\s*?(\r?\n))(^\*{4}\sEND\sOF\sFILE\s\*{4}\s*?$)/m','prcb_cfgmake',$data);
+  $data = preg_replace_callback('/(^\*{4}\s(?:CRYPTED)?(CFG|BIN)FILE:(\S+)\s*?(\r?\n))(^\*{4}\sEND\sOF\sFILE\s\*{4}\s*?$)/m','cfgmake',$data);
   if(preg_match('/^\*{4}\s(.*?)\sCONFIGURATION\sEXPORT.*?FirmwareVersion=(\S+)/s',$data,$array) and $crc = cfgcalcsum($data)) {
    $val = "Modell:   $array[1]\nFirmware: $array[2]\nChecksum: $crc[0] ";
    $val .= (($crc[0] == $crc[1]) ? "(OK)" : "Inkorrekt! - Korrekt: $crc[1]")."\n";
    $data = ($mode) ? $crc[2] : $data;
-   file_put_contents($file,$data);
+   if($file)
+    file_write($file,$data);
    return ($file) ? $val : $data;
   }
  }
- return errmsg("Kein Konfig-Ordner - $dir/pattern.txt nicht gefunden",__FUNCTION__);
+ return errmsg("Keine Konfig-Daten - Konfig-Schablone nicht gefunden",__FUNCTION__);
 }
-function prcb_cfgmake($a,$b='') {			// Helper für Preg_Replace CfgMake
-  if(file_exists("$GLOBALS[val]/$a[3]"))
-   $b = file_get_contents("$GLOBALS[val]/$a[3]");
-  return $a[1].(($a[2] == 'BIN') ? wordwrap(strtoupper(implode('',unpack('H*',$b))),80,$a[4],1) : str_replace("\\","\\\\",$b)).$a[4].$a[5];
-}
-function konfigdecrypt($data,$pass,$sid=false) {	// Konfig-Datei mit Fritz!Box entschlüsseln
+function konfigdecrypt($data,$pass,$sid=0) {		// Konfig-Datei mit Fritz!Box entschlüsseln
  global $cfg;
  if(!$sid)						// Sid sicherstellen
   $sid = $cfg['sid'];
  dbug($data,4,'12,KonfigDeCrypt-Crypted');
  $plain = $buffer = array();
  if($sid and preg_match_all('/^\s*([\w-]+)\s*=\s*("?)(\${4}\w+)\2;?\s*$/m',$data,$array) and preg_match('/(?:\s*Password\d*=\${4}\w+)+/',$data,$var)) {
-  if(preg_match('/^boxusers\s\{\s*^\s{8}users(\s\{.*?^\s{8}\}$)/smx',$k = str_replace("\t","        ",gzinflate(base64_decode("
+  if(preg_match('/^boxusers\s\{\s*^\s{8}users(\s\{.*?^\s{8}\}$)/smx',$k = str_replace("\t","        ",$cfg['zlib']['inflate'](base64_decode("
 	tVnrbxs3Ev8s/RU6+ZuBxJIjO01SH9A4dupD/EDspL1DAYJaUrusd0keyZWsBvnfb4aPfchOIvdgx4B3Z4bkcB6/mdns7u7ujk4/nt385x9v1d3o5ezVZHR8
 	eXF69v7Tx19uzi4vRie/X11+vNmZDE+FqVbU8M/cWKHk0XT64vnk8PnBZBgWkLOL65tfPnwgN/++OjmqhLYvZuRgun/+ltyJUsg7smS2JIxnbjY7JLOcu4Ls
 	0zkRlkkiHXGcaOUs2a/tnBTKOrIqqZxOJdlHvYaXJ+dHdFkNj1UtnVkfTWavhh+ozGua8yPGh7t4l+PT96dnH05eU/PyebbIh3u7w9HuaG9JzZ6rtCfB+01R
@@ -751,19 +884,19 @@ function konfigdecrypt($data,$pass,$sid=false) {	// Konfig-Datei mit Fritz!Box e
    'en' => array('Internet Account Information' => array(1,0,'/^User:\s(.*?)(?:,\sProvider:\s.*?)?$/'), 'Dyn(amic )?DNS' => array(2,1,'/(?<=Domain\sname:\s|user\sname:\s)(.*?)(?=,\s|$)/'),
     'Push service' => array(1,3,'/^e-mail\srecipient:\s(.*?)$/'), 'MyFRITZ!' => $dupe[0], 'FRITZ!Box Users' => $dupe[1]),
    'es' => array('Datos de acceso a Internet' => array(1,0,'/^Usuario:\s(.*?)(?:,\sProvider:\s.*?)?$/'),
-    'DNS dinámico' => array(2,1,'/(?<=Nombre\sdel\sdominio:\s|nombre\sdel\susuario:\s)(.*?)(?=,\s|$)/'),
-    'Push Service' => array(1,3,'/^Destinatario\sde\scorreo:\s(.*?)$/'), 'MyFRITZ!' => $dupe[0], 'Usuarios de FRITZ!Box' => $dupe[1]),
+    '(Dyn)?DNS( dinámico)?' => array(2,1,'/(?<=Nombre\sdel\sdominio:\s|nombre\sdel\susuario:\s)(.*?)(?=,\s|$)/'),
+    'Push Service|Notificaciones' => array(1,3,'/^Destinatario\sde\scorreo:\s(.*?)$/'), 'MyFRITZ!' => $dupe[0], 'Usuarios de FRITZ!Box' => $dupe[1]),
    'fr' => array('Données d\'accès à Internet' => array(1,0,'/^Utilisateur[\xa0\s]?:[\xa0\s](.*?)(?:,\sProvider:\s.*?)?$/'),
-    'DNS dynamique' => array(2,1,'/(?<=Nom\sde\sdomaine[\xa0\s]:[\xa0\s]|nom\sd\'utilisateur[\xa0\s]:[\xa0\s])(.*?)(?=,\s|$)/'),
+    '(Dyn)?DNS( dynamique)?' => array(2,1,'/(?<=Nom\sde\sdomaine[\xa0\s]:[\xa0\s]|nom\sd\'utilisateur[\xa0\s]:[\xa0\s])(.*?)(?=,\s|$)/'),
     'Service push' => array(1,3,'/^Destinataire\sdu\scourrier\sélectronique[\xa0\s]?:[\xa0\s](.*?)$/'), 'MyFRITZ!' => $dupe[0], 'Utilisateur de FRITZ!Box' => $dupe[1]),
    'it' => array('Dati di accesso a Internet' => array(1,0,'/^Utente:\s(.*?)(?:,\sProvider:\s.*?)?$/'), 'Dyn(amic )?DNS' => array(2,1,'/(?<=Nome\sdi\sdominio:\s|nome\sutente:\s)(.*?)(?=,\s|$)/'),
     'Servizio Push' => array(1,3,'/^Destinatario\se-mail:\s(.*?)$/'), 'MyFRITZ!' => $dupe[0], 'Utenti FRITZ!Box' => $dupe[1]),
-   'pl' => array('Dane dost?powe do internetu' => array(1,0,'/^U\?ytkownik:\s(.*?)(?:,\sProvider:\s.*?)?$/'),
+   'pl' => array('Dane dost\?powe do internetu' => array(1,0,'/^U\?ytkownik:\s(.*?)(?:,\sProvider:\s.*?)?$/'),
     'Dyn(amic )?DNS' => array(2,1,'/(?<=Nazwa\sdomeny:\s|nazwa\su\?ytkownika:\s)(.*?)(?=,\s|$)/'), 'Push Service' => array(1,3,'/^Odbiorca\se-maila:\s(.*?)$/'),
-    'MyFRITZ!' => $dupe[0], 'U?ytkownicy FRITZ!Box' => $dupe[1]),
+    'MyFRITZ!' => $dupe[0], 'U\?ytkownicy FRITZ!Box' => $dupe[1]),
   );
   $lang = (ifset($cfg['boxinfo']['Lang']) and ifset($pregimport[$cfg['boxinfo']['Lang']])) ? $cfg['boxinfo']['Lang'] : 'de';
-  dbug(count($list)." verschiedene verschlüsselte Einträge gefunden! (Sprachmuster: $lang)");
+  dbug((count($list) + count($plain))." verschiedene verschlüsselte Einträge gefunden! (Sprachmuster: $lang)");
   dbug($list,4,'KonfigDeCrypt-List');
   $b = 1;
   while($list) {					// Alle Verschlüsselte Einträge durchlaufen
@@ -793,7 +926,7 @@ function konfigdecrypt($data,$pass,$sid=false) {	// Konfig-Datei mit Fritz!Box e
      if($match) {					// Decodierte Kennwörter gefunden
       dbug($match,4,'KonfigDeCrypt-Match');
       foreach($pregimport[$lang] as $key => $var)
-       if($k = array_preg("/^$key$/",$match[2],1) and preg_match_all($var[2],$match[1][$match[2][$k]],$array))
+       if($k = preg_array("/^$key$/",$match[2],1) and preg_match_all($var[2],$match[1][$match[2][$k]],$array))
         foreach($array[1] as $k => $v)
          if(isset($buffer[$var[1] + $k]) and $buffer[$var[1] + $k] != $v) {	// Kennwort sichern
           $plain[$buffer[$var[1] + $k]] = str_replace('"','\\\\"',html_entity_decode($v,ENT_QUOTES,'ISO-8859-1'));
@@ -810,14 +943,16 @@ function konfigdecrypt($data,$pass,$sid=false) {	// Konfig-Datei mit Fritz!Box e
     return errmsg('Entschlüsselungsversuch wurde nicht akzeptiert'
 	.(($val = ifset($var,'/<p class="ErrorMsg">(.*?)<\/p>/')) ? (($val[1] == '?1043?')
 	? "\nBitte \"Ausführung bestimmter Einstellungen und Funktionen zusätzlich bestätigen\" deaktivieren!" : " - $val[1]") : ''),__FUNCTION__);
-   dbug((count($list)) ? floor(count($plain)/(count($list)+count($plain))*100)."% entschlüsselt..." : "100% - Ersetze ".count($plain)." entschlüsselte Einträge...");
+   dbug((count($list)) ? floor(count($plain)/(count($list)+count($plain))*100)."% entschlüsselt..." : "100% ".(($buffer) ? "Es konnte".((count($buffer) == 1)
+	? " ein Eintrag" : "n ".count($buffer)." Einträge")." nicht Entschlüsselt werden! " : "")."- Ersetze ".count($plain)." entschlüsselte Einträge...");
   }
+  dbug($buffer,4,'KonfigDeCrypt-Resistant');
   dbug($plain,4,'KonfigDeCrypt-Plain');			// Plaintext sichern
   if($binfile)						// BinFiles wieder zusammenpacken
    foreach($binfile as $key => $var)
     $data = preg_replace("/(?<=\*{4} BINFILE:$key\s)[\dA-F\s]*(?=\s\*{4} END OF FILE \*{4})/",
 	wordwrap(strtoupper(implode('',unpack('H*',str_replace(array_keys($plain),array_values($plain),$var)))),80,"\n",1),$data,1);
-  $data = str_replace(array_keys($plain),array_values($plain),$data); 
+  $data = str_replace(array_keys($plain),array_values($plain),$data);
   dbug($data,4,'12,KonfigDeCrypt-Decrypted');
   return $data;
  }
@@ -869,25 +1004,25 @@ function showaccessdata($data) {			// Die Kronjuwelen aus Konfig-Daten heraussuc
  if($konfig = konfig2array($data)) {			// Konfig als Array umwandeln
   dbug("Stelle Zugangsdaten zusammen...");
   $access = array(
-   'Mobile-Stick' => array(&$konfig['ar7cfg']['serialcfg'],'=number,provider,username,passwd'),
-   'DSL' => array(&$konfig['ar7cfg']['targets'],'-name,>local>username,>local>passwd'),
-   'IPv6' => array(&$konfig['ipv6']['sixxs'],'=ticserver,username,passwd,tunnelid'),
-   'DynamicDNS' => array(&$konfig['ddns']['accounts'],'=domain,username,passwd'),
-   'MyFRITZ!' => array(&$konfig['jasonii'],'=user_email,user_password,box_id,box_id_passphrase,dyn_dns_name'),
-   'FRITZ!Box-Oberfläche' => array(&$konfig['webui'],'=username,password'),
-   'Fernwartung' => array(&$konfig['websrv']['users'],'=username,passwd'),
-   'TR-069-Fernkonfiguration' => array(&$konfig['tr069cfg']['igd']['managementserver'],'=url,username,password,ConnectionRequestUsername,ConnectionRequestPassword'),
-   'Telekom-Mediencenter' => array(&$konfig['t_media'],'=refreshtoken,accesstoken'),
-   'Google-Play-Music' => array(&$konfig['gpm'],'=emailaddress,password,partition,servername'),
-   'Onlinespeicher' => array(&$konfig['webdavclient'],'=host_url,username,password'),
-   'WLAN' => array(&$konfig['wlancfg'],'/^(((guest|sta)_)?(ssid(_scnd)?|pskvalue)|(sta_)?key_value\d|wps_pin|wds_key)$/i'),
-   'Push-Dienst' => array(&$konfig['emailnotify'],'=From,To,SMTPServer,accountname,passwd','+To,arg0'),
-   'DECT-eMail' => array(&$konfig['configd'],'!<\?xml.*?<list>.*?<email>.*?<pool>(.*?)</pool>!s','!((name)|user_name|(?:smtp_)?server|user|pass|uipin|port)="([^"]+)"!s'),
-   'FRITZ!Box-Benutzer' => array(&$konfig['boxusers']['users'],'-name,email,passwd,password'),
-   'InternetTelefonie' => array(&$konfig['voipcfg'],'_name,username,authname,passwd,registrar,stunserver,stunserverport,gui_readonly'),
-   'IP-Telefon' => array(&$konfig['voipcfg']['extensions'],'-extension_number,username,authname,passwd,clientid'),
-   'Online-Telefonbuch' => array(&$konfig['voipcfg']['onlinetel'],'-pbname,url,serviceid,username,passwd,refreshtoken,accesstoken'),
-   'Virtual-Privat-Network' => array(&$konfig['vpncfg']['connections'],'-name,>localid<fqdn,>remoteid<fqdn,>localid<user_fqdn,>remoteid<user_fqdn,key,>xauth>username,>xauth>passwd'),
+   'Mobile-Stick'		=> array(&$konfig['ar7cfg']['serialcfg'],'=number,provider,username,passwd'),
+   'DSL'			=> array(&$konfig['ar7cfg']['targets'],'-name,>local>username,>local>passwd'),
+   'IPv6'			=> array(&$konfig['ipv6']['sixxs'],'=ticserver,username,passwd,tunnelid'),
+   'DynamicDNS'			=> array(&$konfig['ddns']['accounts'],'=domain,username,passwd'),
+   'MyFRITZ!'			=> array(&$konfig['jasonii'],'=user_email,user_password,box_id,box_id_passphrase,dyn_dns_name'),
+   'FRITZ!Box-Oberfläche'	=> array(&$konfig['webui'],'=username,password'),
+   'Fernwartung'		=> array(&$konfig['websrv']['users'],'=username,passwd'),
+   'TR-069-Fernkonfiguration'	=> array(&$konfig['tr069cfg']['igd']['managementserver'],'=url,username,password,ConnectionRequestUsername,ConnectionRequestPassword'),
+   'Telekom-Mediencenter'	=> array(&$konfig['t_media'],'=refreshtoken,accesstoken'),
+   'Google-Play-Music'		=> array(&$konfig['gpm'],'=emailaddress,password,partition,servername'),
+   'Onlinespeicher'		=> array(&$konfig['webdavclient'],'=host_url,username,password'),
+   'WLAN'			=> array(&$konfig['wlancfg'],'/^(((guest|sta)_)?(ssid(_scnd)?|pskvalue)|(sta_)?key_value\d|wps_pin|wds_key)$/i'),
+   'Push-Dienst'		=> array(&$konfig['emailnotify'],'=From,To,SMTPServer,accountname,passwd','+To,arg0'),
+   'DECT-eMail'			=> array(&$konfig['configd'],'!<\?xml.*?<list>.*?<email>.*?<pool>(.*?)</pool>!s','!((name)|user_name|(?:smtp_)?server|user|pass|uipin|port)="([^"]+)"!s'),
+   'FRITZ!Box-Benutzer'		=> array(&$konfig['boxusers']['users'],'-name,email,passwd,password'),
+   'InternetTelefonie'		=> array(&$konfig['voipcfg'],'_name,username,authname,passwd,registrar,stunserver,stunserverport,gui_readonly'),
+   'IP-Telefon'			=> array(&$konfig['voipcfg']['extensions'],'-extension_number,username,authname,passwd,clientid'),
+   'Online-Telefonbuch'		=> array(&$konfig['voipcfg']['onlinetel'],'-pbname,url,serviceid,username,passwd,refreshtoken,accesstoken'),
+   'Virtual-Privat-Network'	=> array(&$konfig['vpncfg']['connections'],'-name,>localid<fqdn,>remoteid<fqdn,>localid<user_fqdn,>remoteid<user_fqdn,key,>xauth>username,>xauth>passwd'),
   );
   foreach($access as $key => $var)		// Accessliste durcharbeiten
    if(ifset($var[0])) {
@@ -952,10 +1087,29 @@ function showaccessdata($data) {			// Die Kronjuwelen aus Konfig-Daten heraussuc
     if(ifset($var['user_name'],$key))
      unset($config['DECT-eMail'][$key]['user_name']);
    }
+  $a = array('/^\${4}\w+/','(Verschlüsselt)');
+  foreach($config as $key => $var)									// Verschlüsselte Einträge umschreiben
+   if($var) {
+    if($val = preg_array($a[0],$var,3)) {		// Array-Schlüssel umbennenen
+     foreach($val as $k => $v) {
+      $config[$key][] = $v;
+      unset($config[$key][$k]);
+     }
+     $var = $config[$key];
+    }
+    foreach($var as $k => $v)
+     if(is_array($v)) {				// Unterwert umschreiben
+      foreach($v as $kk => $vv)
+       if(ifset($vv,$a[0]))
+        $config[$key][$k][$kk] = $a[1];
+     }
+     elseif(ifset($v,$a[0]))			// Hauptwert umschreiben
+      $config[$key][$k] = $a[1];
+   }
   foreach($config as $key => $var) {									// Array in Text Umwandeln
    if($var and count($var))
     $text .= "\n$key\n";
-   if($var and $kl = max(array_map('strlen',array_keys($var)))) {
+   if($var and $kl = max(array_map('strlen',array_keys($var))))
     foreach($var as $k => $v) {
      $text .= " ".str_pad($k,$kl)." -> ";
      if(is_array($v)) {
@@ -967,12 +1121,13 @@ function showaccessdata($data) {			// Die Kronjuwelen aus Konfig-Daten heraussuc
      }
      $text .= (($GLOBALS['cfg']['wrap']) ? wordwrap($v,$GLOBALS['cfg']['wrap']-($kl+6),str_pad("\n",$kl+6," "),true) : $v)."\n";
     }
-   }
   }
  }
+ else
+  dbug("showaccessdata fehlgeschlagen");
  return $text;
 }
-function getevent($filter='aus',$sep="\t",$sid=false) {	// Ereignisse abrufen
+function getevent($filter='aus',$sep="\t",$sid=0) {	// Ereignisse abrufen
  global $cfg;
  $filters = array('aus','system','internet','telefon','wlan','usb');
  $filter = (($var = ifset($filters,$filter)) !== false) ? $var : 0;
@@ -1011,17 +1166,19 @@ function getevent($filter='aus',$sep="\t",$sid=false) {	// Ereignisse abrufen
 # Eigentlicher Programmstart
 
 if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/^(\w+) ([\d.]+) \(c\) (\d\d)\.(\d\d)\.(\d{4}) by ([\w ]+?) <([.:\/\w]+)>$/')) { ## CLI-Modus ##
- $ver[2] = floatval($ver[2]);				// fb_tools Version
- $ver[] = intval($ver[5].$ver[4].$ver[3]);		// fb_tools Datum
+ $ver[] = intval($ver[5].$ver[4].$ver[3]);		// fb_tools Datum (8)
+ $ver[] = floatval($ver[2]);				// fb_tools Version (9)
+ $php = array(phpversion(),php_uname(),php_sapi_name());// PHP Infos (0 -> version, 1 -> uname, 2 -> sapi_name)
  $uplink = array("mengelke.de","/Projekte;$ver[1].");	// Update-Link
  if(!$script = realpath($argv[0]))			// Pfad zum Scipt anlegen
   $script = realpath($argv[0].".bat");			// Workaround für den Windows-Sonderfall
  $self = basename($script);				// Script_Name
+ $cfg['ptar'] = '/\.t(?=\w)(?:ar)?(\.?gz)?$/i';		// Tar-Ausdruck
  $cfg['dbcd'] = realpath('.').'/';			// Current_Dir für Debug-Daten
- $cfg['head'] = array('User-Agent' => "$self $ver[2] ".php_uname()." PHP ".phpversion()."/".php_sapi_name());	// Fake UserAgent
+ $cfg['head'] = array('User-Agent' => "$self $ver[2] $php[1] PHP $php[0]/$php[2]");	// Fake UserAgent
  $ext = strtolower(preg_replace('/\W+/','',pathinfo($script,PATHINFO_EXTENSION))); // Extension für Unix/Win32 unterscheidung
  define($ver[1],1);					// Feste Kennung für Plugins etc.
- if(!preg_match('/cli/',php_sapi_name()) and function_exists('header_remove')) {	// HTTP-Header löschen wenn PHP-CGI eingesetzt wird
+ if(!preg_match('/cli/',$php[2]) and function_exists('header_remove')) {	// HTTP-Header löschen wenn PHP-CGI eingesetzt wird
   header('Content-type:');
   header_remove('Content-type');
   header_remove('X-Powered-By');
@@ -1043,6 +1200,9 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
  if($cfg['time'])					// Zeitzone festlegen
   @ini_set('date.timezone',$cfg['time']);
  $cfg['time'] = (ifset($_SERVER['REQUEST_TIME_FLOAT'])) ? $_SERVER['REQUEST_TIME_FLOAT'] : array_sum(explode(' ',microtime()));	// Startzeit sichern
+ $gz = (function_exists("gzopen") or function_exists("gzopen64")) ? true : false;	// ZLib Funktionen initialisieren
+ foreach(explode(',','open,close,eof,file,read,write,Encode,Decode,Deflate,Inflate') as $key)
+  $cfg['zlib'][strtolower($key)] = ($key == strtolower($key)) ? (($gz and function_exists("gz$key")) ? "gz$key" : (($gz and function_exists("gz$key64")) ? "gz$key64" : $key)) : strtolower("gz$key");
  $pmax = $argc;		// Anzahl der Parameter
  $pset = 1;		// Optionszähler
 
@@ -1106,6 +1266,8 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
     if($cfg['bsid'])
      dbug("Recycle Login-SID: $cfg[host]");
    }
+   if($var == 'gz')	// GZip Crunchlevel
+    $cfg['zlib']['mode'] = ($v = ifset($vas,'/^-?\d[fhR]?$/')) ? $v[0] : -1;
    if($var == 'fw' and $v = ifset($vas,'/^(\d+\.0)?([1-9])\.?(\d{2})(-\d+)?$/'))	// Fritz!Box Firmware-Version
     $cfg['fiwa'] = (int)$v[2].$v[3];
    foreach(array('o' => 'oput', 'un' => 'user', 'pw' => 'pass', 'fb' => 'host', 'pt' => 'port') as $k => $v)	// Optionen mit Zwangsparameter ohne Prüfung
@@ -1143,7 +1305,7 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
     if(ifset($val[2][$key]))	// Breite sichern
      $cfg['wrap'] = $var;
     if(ifset($val[3][$key]))	// Codepage merken
-     $char = "cp$var";
+     $char = "cp".(($var == 65001 and ifset(($php[1]),'/Windows NT[\s\w_-]*(6\.[01])/i')) ? 850 : $var);
    }
   if($cfg['wrap'] == 'auto')	// Auto fehlgeschlagen -> Wrap deaktiviert
    $cfg['wrap'] = 0;
@@ -1169,7 +1331,7 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
 # Auto-Update (Check)
  if($cfg['upda'] and $uplink and time()-filemtime($script) > $cfg['upda']) {
   dbug("Prüfe auf Updates...");
-  if($fbnet = request('GET',"$uplink[1]md5",0,0,$uplink[0],80) and preg_match("/\((\w+)\s([\d.]+)\)/",$fbnet,$var) and floatval($var[2]) > $ver[2])
+  if($fbnet = request('GET',"$uplink[1]md5",0,0,$uplink[0],80) and preg_match("/\((\w+)\s([\d.]+)\)/",$fbnet,$var) and floatval($var[2]) > $ver[9])
    out("Ein Update ist verfügbar ($var[1] $var[2]) - Bitte nutzen Sie die Update-Funktion\n\nBeispiel:\n$self info update\n\n");
   else
    @touch($script);
@@ -1217,11 +1379,15 @@ $self 169.254.1.1 bi" : ""));
   }
   elseif(ifset($val['gip'])) {				// Get Extern IP
    if(ifset($cfg['help']))
-    out("$self <fritz.box:port> [GetIP|gip]".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
+    out("$self <fritz.box:port> [GetIP|gip] <Filter>".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
 Beispiele:
 $self getip
-$self 169.254.1.1 gip" : ""));
+$self getip ipv4
+$self 169.254.1.1 gip
+$self gip dns" : ""));
    elseif($array = getexternalip()) {
+    if($pset < $pmax and preg_match('/[-\w]+/',$argv[$pset],$var))
+     $array = preg_array("/$var[0]/i",$array,3);
     $val = 0;
     foreach($array as $key => $var)
      $val = max($val,strlen($key));
@@ -1236,15 +1402,15 @@ $self 169.254.1.1 gip" : ""));
   }
   elseif(ifset($val['i'])) {				// Info (Intern)
    if(ifset($cfg['help']))
-    out("$self [Info|i] <Funktion|Datei>\n
+    out("$self [Info|i] <Funktion|Datei> <Parameter>\n
 Funktionen:
-Echo                 Parameter ausgeben
+Echo <str> <...>     Parameter ausgeben
 Globals              Alle PHP-Variabeln ausgeben
-PenGramm             Kodierungstest mit Umlauten und ASCII-Art
+PanGramm             Kodierungstest mit Umlauten und ASCII-Art
 PHP                  PHPInfo() ausgeben
 UpDate <Check|Force> FB_Tools über das Internet aktualisieren
-WebGet               Datei aus Url herunterladen und HTTP-Header ausgeben
-StrfTime             Alle Zeit-Angaben von strftime ausgeben
+WebGet   <url>       Datei aus Url herunterladen und HTTP-Header ausgeben
+StrfTime <str>       Alle Zeit-Angaben von strftime ausgeben
 <Datei>              Verschiedene Hashes von einer Datei berechnen".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
 Beispiele:
 $self info
@@ -1253,7 +1419,7 @@ $self info php
 $self info fb_config.php
 $self info update
 $self info wg http://m.p7.de/fb_tools.bat
-$self info strftime
+$self info strftime '%d.%m.%y %H:%M:%S'
 $self i pg -c:ansi
 $self i -d" : ""));
    elseif($pset < $pmax and preg_match('/^(?:(?<php>PHP)|(?<g>G(?:LOBALS)?)|(?<pg>P(?:anGramm|g))|(?<ud>U(?:pdate|d))|(?<e>e|Echo)|(?<wg>wg|W(eb)?Get)|(?<st>st|StrfTime))$/ix',$argv[$pset],$var)
@@ -1269,8 +1435,8 @@ $self i -d" : ""));
     elseif(ifset($var['g']))				// GLOBALS
      out($GLOBALS);
     elseif(ifset($var['pg']))				// Pangramm mit Kitty
-     out("Welch fieser Katzentyp quält da süße Vögel bloß zum Jux?\n\n"
-	.gzinflate(base64_decode('HYuxDcAgEAN7pnBnkN5Pk44RsgLS06anicTwgbg56U4GVse/MDNJZpGAasPFwRPkQFNrJyy7BBQUWbi3jgwMion7SuaoG1uJPQruZ873Aw')));
+     out(wordwrap("Welch fieser Katzentyp quält da süße Vögel bloß zum Jux?\n",min((($cfg['wrap']) ? (int)$cfg['wrap'] : 80),42)).$cfg['zlib']['inflate'](base64_decode(
+	"TY0xDsMwDAP3APkDN9qAaC/ZDOQD/YIRa+2epUCQt1dOl2ohJR4o4H+u/tNhZpLMxrrciTuwe36Sal5E5/QqQFNrk0JFAAlPwWWbEHuWjVJajzuc4roQxwQOOMD4QKZRQyIX+8h4vc/z8wU")));
     elseif(ifset($var['e']))				// Echo
      out(trim(implode(' ',array_slice($argv,$pset,$pmax-$pset))));
     elseif(ifset($var['st'])) {				// strftime
@@ -1279,10 +1445,10 @@ $self i -d" : ""));
      else {
       $array = array();
       $len = 0;
-      for($a=1; $a <= 26; $a++)
-       for($b=0; $b < 2; $b++)
-        for($c=0; $c < 2; $c++) {
-         $key = (($c) ? '-' : "").chr($a+64+32*$b);
+      for($a=1; $a <= 26; $a++)		// Alle Buchstaben
+       for($b=0; $b < 2; $b++)		// Gross und kleinschreibung
+        for($c=0; $c < 2; $c++) {	// Positiv und Negativ
+         $key = (($c) ? '-' : "").chr($a + 64 + 32 * $b);
          $var = strftime("%$key");
          $val = str_replace(array("\n","\t"),array('\n','\t'),str_pad("%$key",4," ")."= $var");
          if($var and $var != "%$key" and (!$c or preg_replace('/^%-?(\w)\s*/','%$1  ',$val) != $array[substr($key,1)])) {
@@ -1304,14 +1470,14 @@ $self i -d" : ""));
      if($uplink and $fbnet = request('GET-array',"$uplink[1]md5",0,0,$uplink[0],80)) {	// Update-Check
       if(preg_match("/((\d\d)\.(\d\d)\.(\d{4}))\s[\d:]+\s*\((\w+)\s([\d.]+)\)(?:.*?(\w+)\s\*\w+\.$ext(?=\s))?/s",$fbnet[1],$up)) {
        $val = ($pset < $pmax and preg_match('/^(?:(C(?:heck)?)|(F(?:orce)?))$/i',$argv[$pset],$var)) ? $var : false;
-       if(intval($up[4].$up[3].$up[2]) > $ver[8] and floatval($up[6]) > $ver[2] or ifset($val[2])) {
+       if(intval($up[4].$up[3].$up[2]) > $ver[8] and floatval($up[6]) > $ver[9] or ifset($val[2])) {
         out("Ein Update ist verfügbar: $up[5] $up[6] vom $up[1]");
         if(!ifset($val[1]) or ifset($val[2])) {
          out("Installiere Update ... ");
          $manuell = "!\nBitte installieren Sie es von http://$uplink[0]/.dg manuell!";
          if(ifset($up[7]) and $up[8] = @request('GET',"$uplink[1]$ext.gz",0,0,$uplink[0],80)) {
           $rename = preg_replace('/(?=(\.\w+)?$)/',"_$ver[2].bak",$script,1);	// Neuer Name für alte Version
-          if(function_exists('gzdecode') and $var = @gzdecode($up[8]) and md5($var) == $up[7] and @rename($script,$rename)) {	// Update ab PHP5
+          if($var = $cfg['zlib']['decode']($up[8]) and md5($var) == $up[7] and @rename($script,$rename)) {	// Update ab PHP5
            file_put_contents($script,$var);
            @chmod($script,intval(fileperms($rename),8));
            out("abgeschlossen!");
@@ -1326,7 +1492,7 @@ $self i -d" : ""));
        else {
         @touch($script);						// Aktuelles Datum setzen
         out("Kein neues Update verfügbar");
-        if(ifset($up[6],$ver[2]) and $up[7] != md5_file($script))	// MD5-Check
+        if(ifset($up[6],$ver[9]) and $up[7] != md5_file($script))	// MD5-Check
          out("Hinweis: $self wurde verändert");
        }
       }
@@ -1347,7 +1513,7 @@ $self i -d" : ""));
      logout($sid);
    }
    else {						// FB_Tools-Version, PHP Kurzinfos und Hashes ausgeben
-    $var = array("PHP ".phpversion()."/".php_sapi_name(),php_uname());
+    $var = array("PHP $php[0]/".$php[2],$php[1]);
     out("$ver[0]\n".implode(($cfg['wrap'] and strlen($var[0].$var[1])+3 < $cfg['wrap']) ? " - " : "\n",$var)
 	."\nTerminal-Infos: Breite: $cfg[wrap], Zeichensatz: $cfg[char]\n\n");
     $file = ($pset < $pmax and file_exists($argv[$pset])) ? $argv[$pset++] : $script;
@@ -1358,7 +1524,7 @@ $self i -d" : ""));
     $max = max(array_map('strlen',array_keys($array)));
     foreach($array as $key => $var)
      out(str_pad("$key:",$max+2,' ').(($cfg['wrap'] and $cfg['wrap'] < strlen($var)+$max+2) ? substr_replace($var,str_pad("\n",$max+3,' '),strlen($var)/2,0) : $var));
-    if($cfg['char'] == 'utf7' and isset($cfg['utf8']) and !$cfg['utf8'] and preg_match('/linux/i',php_uname()))
+    if($cfg['char'] == 'utf7' and isset($cfg['utf8']) and !$cfg['utf8'] and preg_match('/linux/i',$php[1]))
      out("\nHinweis: UTF-8 wird nicht unterstützt, Bitte installieren Sie das Paket php-xml nach\nBeispiel: sudo apt-get install php-xml");
    }
   }
@@ -1382,7 +1548,7 @@ $self ss \"FRITZ!Box Fon WLAN 7390-B-010203-040506-000000-000000-147902-840522-2
     out(($var = supportcode(($pset < $pmax) ? $argv[$pset++] : false)) ? $var : errmsg(0,'supportcode'));
   }
   elseif(ifset($val['e'])) {				// Ereignisse
-   if(ifset($cfg['help']) or $pset == $pmax)
+   if(ifset($cfg['help']))
     out("$self <user:pass@fritz.box:port> [Ereignisse|e] <Datei|:> <Filter> <Seperator>\n
 Folgende Filter sind Möglich: alle, telefon, internet, usb, wlan, system
 Hinweis: Der Dateiname wird mit strftime geparst (http://strftime.org)".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
@@ -1392,7 +1558,7 @@ $self password@fritz.box Ereignisse event-internet.csv internet ;
 $self 192.168.178.1 e : -pw:secret
 $self user:pass@169.254.1.1 e logs-%y%m%d.log" : ""));
    elseif($sid = (ifset($cfg['bsid'])) ? $cfg['bsid'] : login()) {	// Einloggen
-    $file = $argv[$pset++];
+    $file = ($pset == $pmax) ? false : $argv[$pset++];
     if(ifset($file,'/^[:*]$/'))					// * : -> Ausgabe auf Console
      $file = false;
     elseif(strpos($file,'%') !== false)			// Dateiname mit strftime parsen?
@@ -1449,14 +1615,18 @@ ImPort          [Datei|Ordner] <Kennwort>  - Konfig importieren(1)
 ImPort-CalcSum  [Datei|Ordner] <Kennwort>  - Veränderte Konfig importieren(1)
 
 (1) Anmeldung mit Logindaten erforderlich / (2) Ohne Fritz!Box nutzbar
-(3) Fritz!Box mit OS 5 oder neuer erforderlich / [ ] Pflicht / < > Optional".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
+(3) Fritz!Box mit OS 5 oder neuer erforderlich / [ ] Pflicht / < > Optional
+Ab OS 6.69 muss die Sicherheits-Bestätigungsfunktion deaktiviert werden".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
+
 Beispiele:
 $self password@fritz.box konfig export
 $self fritz.box konfig extrakt
-$self konfig file fritzbox.export
+$self konfig file fritzbox.export.gz
 $self fritz.box konfig file-decrypt fb.export geheim fbdc.export -d
+$self fritz.box konfig extract archiv.tar.gz
 $self k fcs Export-Ordner fritzbox.export
 $self username:password@fritz.box konfig import \"fb 7170.export\"
+$self password@fritz.box konfig import archiv.tar.gz
 $self 169.254.1.1 k ipcs \"FRITZ.Box Fon WLAN 6360 85.04.86_01.01.00_0100.export\"" : ""));
    elseif(preg_match('/^(						# 1:Alle
 	|i(p|mport)(cs|-calcsum)?					# 2:Import 3:CalcSum
@@ -1468,6 +1638,8 @@ $self 169.254.1.1 k ipcs \"FRITZ.Box Fon WLAN 6360 85.04.86_01.01.00_0100.export
     $mode = array_pad($mode,12,null);
     $file = ($pset < $pmax) ? $argv[$pset++] : false;
     $pass = ($pset < $pmax) ? $argv[$pset++] : false;
+    if(isset($cfg['utf8']) and !$cfg['utf8'] and ($mode[3] or $mode[5] or $mode[10]))
+     out("Hinweis: UTF8 wird auf Ihrem System von PHP nicht ünterstützt, daher ist die Entschlüsselung Problematisch!");
     if(($mode[2] or $mode[4] or $mode[6])) {		// Login Optionen
      if($sid = (ifset($cfg['bsid'])) ? $cfg['bsid'] : login()) {
       if($mode[5] or $mode[7]) {			// Kennwort-Entschlüsselung
@@ -1485,27 +1657,31 @@ $self 169.254.1.1 k ipcs \"FRITZ.Box Fon WLAN 6360 85.04.86_01.01.00_0100.export
         makedir($file);					// Verzeichnis erstellen
         $file = false;
        }
-       if($mode[5] and $pass and $data = cfgexport('array',$pass)) {	// Exportieren mit Entschlüsselten Benutzerdaten
-        if($data[1] = konfigdecrypt($data[1],$pass,$sid)) {
+       if($mode[5] and $pass and $data = cfgexport('array',$pass) and $data[1]) {	// Exportieren mit Entschlüsselten Benutzerdaten
+        if($data[1] and $data[1] = konfigdecrypt($data[1],$pass,$sid)) {
          out(showaccessdata($data[1]));
          saverpdata($file,$data,'file.export');
         }
         else
-         out(errmsg(0,'konfigdecrypt'));
+         out(errmsg(0,'konfigdecrypt') || errmsg(0,'cfgexdport') || errmsg(0,'request'));
        }
-       else						// Export direkt File
+       elseif(!ifset($data))				// Export direkt File
         out(cfgexport(($file) ? $file : true,$pass) ? "Konfiguation wurde erfolgreich exportiert" : errmsg(0,'request'));
+       else
+        out(($var = errmsg(0,'request')) ? $var : "Keine Konfig erhalten - Möglichlichweise ist noch die Sicherheits-Bestätigungsfunktion aktiviert?");
       }
-      elseif($mode[6]) {				// Extrakt
-       makedir($file);					// Verzeichnis erstellen
-       if($data = cfgexport('array',$pass)) {		// Konfigdaten holen
+      elseif($mode[6]) {					// Extrakt
+       if($data = cfgexport('array',$pass) and $data[1]) {	// Konfigdaten holen
+        $mod = ($file) ? ((preg_match($cfg['ptar'],$file,$var)) ? ((ifset($var[1])) ? 3 : 2) : 1) : 0;
+        if($mod == 1)
+         makedir($file);					// Verzeichnis erstellen
         if($mode[7] and $pass and $data[2] = konfigdecrypt($data[1],$pass,$sid))	// Konfig Entschlüsseln
-         out(cfginfo($data[2],$file,showaccessdata($data[2])));
+         out(cfginfo($data[2],$mod,$file,showaccessdata($data[2])));
         else
-         out(cfginfo($data[1],$file));
+         out(cfginfo($data[1],$mod,$file));
        }
        else
-        out(errmsg(0,'request'));
+        out(($var = errmsg(0,'request')) ? $var : "Keine Konfig erhalten - Möglichlichweise ist noch die Sicherheits-Bestätigungsfunktion aktiviert?");
       }
       elseif($mode[2] and $file and file_exists($file))	// Import-Konfig
        out((cfgimport($file,$pass,$mode[3])) ? "Konfig wurde hochgeladen und wird nun bearbeitet" : errmsg(0,'cfgimport'));
@@ -1517,28 +1693,37 @@ $self 169.254.1.1 k ipcs \"FRITZ.Box Fon WLAN 6360 85.04.86_01.01.00_0100.export
      else
       out(errmsg(0,'login'));
     }
-    elseif($mode[8] and !$mode[10] and !$mode[11] and is_file($file) and $data = file_get_contents($file)) {	// Converter-Modus File -> Dir
-     if($pass)				// Verzeichniss angegeben ?
+    elseif($mode[8] and !$mode[10] and !$mode[11] and is_file($file) and $data = file_read($file) and preg_match('/^\*{4}\s+\w+.*CONFIGURATION EXPORT/',$data)) {	// Converter-Modus File -> Dir
+     $mod = ($pass) ? ((preg_match($cfg['ptar'],$pass,$var)) ? ((ifset($var[1])) ? 3 : 2) : 1) : 0;
+     if($mod == 1)	// Verzeichniss angegeben ?
       makedir($pass);
-     out(($data = cfginfo($data,$pass)) ? $data : "Keine Konfig Export-Datei angegeben");
+     out(($data = cfginfo($data,$mod,$pass)) ? $data : "Keine Konfig Export-Datei angegeben");
     }
-    elseif($mode[8] and !$mode[10] and !$mode[11] and is_dir($file) and $pass and (!file_exists($pass) or is_file($pass)))	// Converter-Modus Dir -> File
-     out(($data = cfgmake($file,$mode[9],$pass)) ? $data : "Kein Konfig Export-Verzeichnis angegeben");
-    elseif($mode[8] and $mode[10] and !$mode[11] and $pass and is_file($file) and $data = file_get_contents($file)) {		// Kennwörter Entschlüsseln
+    elseif($mode[8] and !$mode[10] and !$mode[11] and (preg_match($cfg['ptar'],$file,$val) and is_file($file) or is_dir($file))) {	// Converter-Modus Dir/Tar -> File
+     if($val)
+      $file = tar2array($file);
+     out(($file) ? (($data = cfgmake($file,$mode[9],$pass)) ? (($pass) ? $data : cfginfo($data)) : "Kein Konfig Export-Archiv/Verzeichnis angegeben") : errmsg(0,'tar2array'));
+    }
+    elseif($mode[8] and $mode[10] and !$mode[11] and $pass and is_file($file) and $data = (preg_match($cfg['ptar'],$file)) ? cfgmake(tar2array($file)) : file_read($file)) {		// Kennwörter Entschlüsseln
      if($sid = (ifset($cfg['bsid'])) ? $cfg['bsid'] : login()) {
-      if($cfg['fiwa'] > 500) {				// Entschlüsselung durchführen
+      if($cfg['fiwa'] > 500) {					// Entschlüsselung durchführen
        if($data = konfigdecrypt($data,$pass,$sid)) {
+        $save = false;
         if($pset < $pmax and $save = $argv[$pset++]) {
-         if(preg_match('/^(.*?)[\\\\\/]$/',$save,$var))	// Verzeichnis erstellen
+         if(preg_match('/^(.*?)[\\\\\/]$/',$save,$var)) {	// Verzeichnis erstellen
           makedir($save);
+          $mod = 1;
+         }
+         elseif(preg_match($cfg['ptar'],$save,$var))
+          $mod = (ifset($var[1])) ? 3 : 2;
          else {
-          file_put_contents($save,$data);		// Entschlüsselte Konfig sichern
-          $file = false;
+          file_write($save,$data);				// Entschlüsselte Konfig sichern
+          $mod = 0;
          }
         }
         else
-         $file = false;
-        out(cfginfo($data,$file,showaccessdata($data)));// Daten als Text Präsentieren
+         $mod = 0;
+        out(cfginfo($data,$mod,$save,showaccessdata($data)));	// Daten als Text Präsentieren
        }
        else {
         out(errmsg(0,'konfigdecrypt'));
@@ -1554,15 +1739,19 @@ $self 169.254.1.1 k ipcs \"FRITZ.Box Fon WLAN 6360 85.04.86_01.01.00_0100.export
      else
       out(errmsg(0,'login'));
     }
-    elseif($mode[8] and $mode[11] and is_file($file) and $pass)			// JSON Konverter
+    elseif($mode[8] and $mode[11] and is_file($file) and $pass)				// JSON Konverter (File -> File)
      if(function_exists('json_encode'))
-      out(($data = file_get_contents($file) and $array = konfig2array($data))
-	? ((file_put_contents($pass,json_encode($array))) ? "Konfig-Datei erflogreich in JSON konvertiert" : errmsg(0,'konfig2array'))
-	: errmsg(0,'konfig2array'));
+      if($data = file_read($file) and $array = konfig2array($data))
+       if($data = json_encode($array) and file_write($pass,$data))
+        out("Konfig-Datei erflogreich in JSON konvertiert");
+       else
+        out("JSON_Encode von PHP $php[0] ist fehlgeschlagen");
+      else
+       out("Keine Konfig-Datei");
      else
-      out('JSON wird von PHP '.phpversion()." nicht unterstützt");
+      out("JSON wird von PHP $php[0] nicht unterstützt");
     else
-     out("Parameter-Ressourcen zu $mode[0] nicht gefunden oder nicht korrekt angegeben");
+     out("Parameter-Ressourcen zu Konfig $mode[0] nicht gefunden oder nicht korrekt angegeben");
    }
    else
     out("Unbekannte Funktionsangabe für Konfig");
@@ -1596,15 +1785,15 @@ $self 169.254.1.1 sd -pw:geheim" : ""));
     $file = ($pset < $pmax) ? $argv[$pset++] : false;
     $et = ($pset < $pmax and ifset($argv[$pset],'/^(ExTrakt|et)$/i')) ? $pset++ : false;
     $tm = ($pset < $pmax and $var = ifset($argv[$pset],'/^(Telemetrie|tm)([:=-]a((n)|us))$/i')) ? ((ifset($var[4])) ? $pset++ : 0) : false;
-    if($et and $file and makedir($file))	// Neues Verzeichniss erstellen
+    $mode = ($file and preg_match($cfg['ptar'],$file,$var)) ? ((ifset($var[1])) ? 2 : 1) : 0;
+    if(!$mode and $et and $file and makedir($file))	// Neues Verzeichniss erstellen
      $file = './';
     if($et and $cfg['fiwa'] >= 630) {		// Extrakt
      dbug("Hole Support-Daten zum extrahieren");
-     if($data = supportdata(0,$tm) and $text = supportdataextrakt($data[1])) {
+     if($data = supportdata(0,$tm) and $text = supportdataextrakt($data[1],$mode,$file))
       out("\n$text\n");
-     }
      elseif($data[1])
-      file_put_contents(($file != './') ? $file : ((preg_match('/filename=(["\']?)(.*?)\1/i',$data['Content-Disposition'],$var))
+      file_write((!preg_match($cfg['ptar'],$file) and substr($file,-1) != '/') ? $file : ((preg_match('/filename=(["\']?)(.*?)\1/i',$data['Content-Disposition'],$var))
        ? preg_replace('/[?\\\\\/<*>:"]+/','_',$var[2]) : "Supportdaten.txt"),$data[1]);
     }
     elseif(supportdata(($file) ? $file : './',$tm))
@@ -1661,7 +1850,7 @@ Dial         - Rufnummer wählen(2)
 Ereignisse   - Systemmeldungen abrufen(2)
 GetIP        - Aktuelle externe IPv4-Adresse ausgeben(1)
 Info         - FB-Tools/PHP Version, MD5/SHA1 Checksum, Update/Prüfen(3)
-Konfig       - Einstellungen Ex/Importieren, Daten entschlüsseln(2,3)
+Konfig       - Einstellungen Ex/Importieren, Daten entschlüsseln(2,3,4)
 Login/Logout - Manuelles Einloggen für Scriptdateien(2)
 PlugIn       - Weitere Funktion per Plugin-Script einbinden
 ReConnect    - Neueinwahl ins Internet(1)
@@ -1669,7 +1858,8 @@ SupportDaten - AVM-Supportdaten Speichern(2)
 SystemStatus - Modell, Version, Laufzeiten, Neustarts und Status ausgeben(3)
 
 (1) Aktiviertes UPnP erforderlich / (2) Anmeldung mit Logindaten erforderlich
-(3) Teilweise ohne Fritz!Box nutzbar / [ ] Pflicht / < > Optional".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
+(3) Teilweise ohne Fritz!Box nutzbar / [ ] Pflicht / < > Optional
+(4) Ab OS 6.69 muss die Sicherheits-Bestätigungsfunktion deaktiviert werden".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
 Beispiele:
 $self secret@fritz.box supportdaten
 $self hans:geheim@fritz.box konfig export
@@ -1694,7 +1884,8 @@ Login:   -s:[SID|Datei] - Manuelle SID Angabe (Für Scriptdateien)
          -fw:[Version]  - Manuelle Angabe der Firmware-Version ($cfg[fiwa])
          -pt:[Port]     - Alternative Port Angabe ($cfg[port])
          -pw:[Pass]     - Alternative Kennwort Angabe
-         -un:[User]     - Alternative Benutzername Angabe");
+         -un:[User]     - Alternative Benutzername Angabe
+Dateien: -gz:[Level]    - Packstufe festlegen ({$cfg['zlib']['mode']})");
   elseif($cfg['help'] === true)
    out("\nMehr Hilfe bekommen Sie mit -h:a (Alles) -h:b (Beispiele) -h:o (Optionen)");
   if(ifset($help))
