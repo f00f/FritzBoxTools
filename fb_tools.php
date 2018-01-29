@@ -1,5 +1,5 @@
 #!/usr/bin/php
-<?php $ver = "fb_tools 0.17 (c) 06.08.2016 by Michael Engelke <http://www.mengelke.de>"; #(charset=iso-8859-1 / tabs=8 / lines=lf)
+<?php $ver = "fb_tools 0.18 (c) 20.08.2016 by Michael Engelke <http://www.mengelke.de>"; #(charset=iso-8859-1 / tabs=8 / lines=lf)
 
 if(!isset($cfg)) {					// $cfg schon gesetzt?
  $cfg = array(
@@ -73,6 +73,22 @@ if(!function_exists('file_put_contents')) {		// http://php.net/file_put_contents
   return $fp;
  }
 }
+if(!function_exists('gzdecode')) {			// http://php.net/gzdecode (Workaround)
+ function gzdecode($data) {
+  if($tmp = tempnam(null,'gz') and $fp = fopen($tmp,'w')) {	// Gepackte Daten speichern
+   fwrite($fp,$data);
+   fclose($fp);
+   $data = null;
+   if($fp=gzopen($tmp,'rb')) {					// Daten entpackt lesen
+    while(!gzeof($fp))
+     $data .= gzread($fp,$GLOBALS['cfg']['sbuf']);
+    gzclose($fp);
+   }
+   @unlink($tmp);						// Überreste löschen
+  }
+  return $data;
+ }
+}
 function crc_32($str,$file=false) {			// Berechnet die CRC32 Checksume von einen String (Optional von einer Datei)
  return str_pad(sprintf('%X',crc32(($file) ? file_get_contents($str) : $str)),8,0,STR_PAD_LEFT);
 }
@@ -91,7 +107,7 @@ function out($str,$mode=0) {				// Textconvertierung vor der ausgabe (mode: 0 ->
   if($cfg['oput'] and !($mode/(1<<2)%2))			// Ausgabe speichern
    file_put_contents($cfg['oput'],$str,8);
   if((int)$cfg['wrap'] and !ifset($cfg['char'],'/7bit|(13{2}|utf)7/'))	// Wortumbruch
-   $str = wordwrap($str,($cfg['wrap']-1),"\n",true);
+   $str = wordwrap($str,$cfg['wrap']-1,"\n",true);
   if(ifset($cfg['char'],'/^(dos|oem|c(odepage|p)?(437|850))$/'))
    $str = str_replace(array('ä','ö','ü','ß','Ä','Ö','Ü','§',"\n"),array(chr(132),chr(148),chr(129),chr(225),chr(142),chr(153),chr(154),chr(21),"\r\n"),$str);
   elseif($cfg['char'] == 'utf8')
@@ -103,10 +119,10 @@ function out($str,$mode=0) {				// Textconvertierung vor der ausgabe (mode: 0 ->
    and preg_match_all('/([a-z\d])(.)|(.)(..)/i','1I2Z3E4A5S6G7T8B9g0Oa4A4b8B8c<C(e3E3g6G6h#H#i!I!l1L1o0O0q9Q9s5S5t7T7x+X+z2Z2ä4:Ä4:ö0:Ö0:üu:ÜU:ß55§55',$var)
    and preg_match_all('/(.)(.+)/',implode("\n",$var[0]),$var))
     $str = strtr($str,array_combine($var[1],$var[2]));
-  elseif(!ifset($cfg['char'],'/^(ansi|(codepage|cp)1252|iso.?8859.?1)$/i')) /* if($cfg['char'] == '7bit') */
+  elseif(!ifset($cfg['char'],'/^(ansi|(codepage|cp)1252|iso.?8859.?1|ascii)$/i')) /* if($cfg['char'] == '7bit') */
    $str = str_replace(array('ä','ö','ü','ß','Ä','Ö','Ü','§'),array('ae','oe','ue','ss','Ae','Oe','Ue','SS'),$str);
   if((int)$cfg['wrap'] and ifset($cfg['char'],'/7bit|(13{2}|utf)7/'))	// Wortumbruch
-   $str = wordwrap($str,($cfg['wrap']-1),"\n",true);
+   $str = wordwrap($str,$cfg['wrap']-1,"\n",true);
  }
  return ($mode/(1<<0)%2) ? $str : print $str;
 }
@@ -235,7 +251,7 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
   if(!isset($head['host']))				// Host zum Header hinzufügen
    $head['host'] = $host;
   if(!isset($head['connection']))			// Connection zum Header hinzufügen
-   $head['connection'] = "Closed";
+   $head['connection'] = "close";
   foreach($head as $key => $var)			// Header vorbeireiten
    $head[$key] = ucwords($key).": $var";
   $head = "HTTP/1.1\r\n".implode("\r\n",$head)."\r\n";
@@ -250,9 +266,9 @@ function request($method,$page='/',$body=false,$head=false,$host=false,$port=fal
     if($pos = strpos($rp,"\r\n\r\n")) {			// Header/Content trennen
      $header = substr($rp,0,$pos);
      $rp = substr($rp,$pos+4);
-     $file[1] = preg_replace('/(?<=\/)$|^$/',($file[1]
+     $file[1] = preg_replace('/(?<=[\\\\\/])$|^\.?$/',(ifset($file[1],'/^[.\\\\\/]*$/')
 	and preg_match('/^Content-Disposition:\s*(?:attachment;\s*)?filename=(["\']?)(.*?)\1\s*$/mi',$header,$var))
-	? preg_replace('/[?\\\\\/<*>:"]+/','_',$var[2]) : 'file.bin',$file[1]);
+	? preg_replace('/[?\\\\\/<*>:"]+/','_',$var[2]) : basename($page),$file[1]);
      dbug("Downloade '$file[1]'".((preg_match('/Content-Length:\s*(\d+)/',$header,$var)) ? " ".number_format($var[1],0,'.',',')." Bytes" : ""));
      if($sp = fopen($file[1],'w')) {
       fputs($sp,$rp);
@@ -511,7 +527,7 @@ function cfgexport($mode,$pass=false,$sid=false) {	// Konfiguration Exportieren 
    $body = array_merge(array('sid' => $sid),$body);
  }
  return ($mode)	? (($mode === 'array')	? request('POST-array',$path,$body)
-					: request('POST-save:'.(($mode === true) ? './' : $file),$path,$body))
+					: request('POST-save:'.(($mode === true) ? './' : $mode),$path,$body))
 		: request('POST',$path,$body);
 }
 function cfgcalcsum($data) {				// Checksumme für die Konfiguration berechnen
@@ -802,7 +818,7 @@ function showaccessdata($data) {			// Die Kronjuwelen aus Konfig-Daten heraussuc
    'Telekom-Mediencenter' => array(&$konfig['t_media'],'=refreshtoken,accesstoken'),
    'Google-Play-Music' => array(&$konfig['gpm'],'=emailaddress,password,partition,servername'),
    'Onlinespeicher' => array(&$konfig['webdavclient'],'=host_url,username,password'),
-   'WLAN' => array(&$konfig['wlancfg'],'/^((guest_)?(ssid(_scnd)?|pskvalue)|(sta_)?key_value\d|wps_pin|wds_key)$/i'),
+   'WLAN' => array(&$konfig['wlancfg'],'/^(((guest|sta)_)?(ssid(_scnd)?|pskvalue)|(sta_)?key_value\d|wps_pin|wds_key)$/i'),
    'Push-Dienst' => array(&$konfig['emailnotify'],'=From,To,SMTPServer,accountname,passwd','+To,arg0'),
    'DECT-eMail' => array(&$konfig['configd'],'!<\?xml.*?<list>.*?<email>.*?<pool>(.*?)</pool>!s','!((name)|user_name|(?:smtp_)?server|user|pass|uipin|port)="([^"]+)"!s'),
    'FRITZ!Box-Benutzer' => array(&$konfig['boxusers']['users'],'-name,email,passwd,password'),
@@ -927,7 +943,7 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
   $script = realpath($argv[0].".bat");			// Workaround für den Windows-Sonderfall
  $self = basename($script);				// Script_Name
  $cfg['dbcd'] = realpath('.').'/';			// Current_Dir für Debug-Daten
- $cfg['head'] = array('Useragent' => "$self $ver[2] ".php_uname()." PHP ".phpversion()."/".php_sapi_name());	// Fake UserAgent
+ $cfg['head'] = array('User-Agent' => "$self $ver[2] ".php_uname()." PHP ".phpversion()."/".php_sapi_name());	// Fake UserAgent
  $ext = strtolower(preg_replace('/\W+/','',pathinfo($script,PATHINFO_EXTENSION))); // Extension für Unix/Win32 unterscheidung
  define($ver[1],1);					// Feste Kennung für Plugins etc.
  if(!preg_match('/cli/',php_sapi_name()) and function_exists('header_remove')) {	// HTTP-Header löschen wenn PHP-CGI eingesetzt wird
@@ -1068,7 +1084,7 @@ if(ifset($argv) and $argc and (float)phpversion() > 4.3 and $ver = ifset($ver,'/
   elseif($var = ifset($_SERVER['LANG'],'/(UTF-?8)|((?:iso-)?8859-1)/i') and ($var[1] and !isset($cfg['utf8'])) or ifset($var[2]))	// Linux/Ubuntu
    $cfg['char'] = ($var[1]) ? 'utf8' : 'iso_8859_1';
   elseif(isset($_SERVER['HOME']) and isset($_SERVER['USER']) and isset($_SERVER['TERM']) and isset($_SERVER['SHELL'])	// Unix/Linux/Mac
-	and file_exists('/usr/bin/locale') and preg_match('/(utf-?8)|(ansi|iso-?8859-?1)/i',@exec('locale charmap'),$var))
+	and file_exists('/usr/bin/locale') and preg_match('/(utf-?8)|(ansi|iso-?8859-?1|ascii)/i',@exec('locale charmap'),$var))
    $cfg['char'] = (ifset($var[1]) and !isset($cfg['utf8'])) ? 'utf8' : ((ifset($var[2])) ? strtolower(str_replace('-','_',$var[2])) : 'utf7');
   elseif(isset($_SERVER['SystemDrive']) and isset($_SERVER['SystemRoot']) and isset($_SERVER['APPDATA']))	// Windows
    $cfg['char'] = 'oem';
@@ -1142,20 +1158,25 @@ $self 169.254.1.1 gip" : ""));
    if(ifset($cfg['help']))
     out("$self [Info|i] <Funktion|Datei>\n
 Funktionen:
+Echo                 Parameter ausgeben
 Globals              Alle PHP-Variabeln ausgeben
+Kitty                ASCII-Art ausgeben
 PenGramm             Kodierungstest mit Umlauten
 PHP                  PHPInfo() ausgeben
 UpDate <Check|Force> FB_Tools über das Internet aktualisieren
+WebGet               Datei aus Url herunterladen und HTTP-Header ausgeben
 <Datei>              Verschiedene Hashes von einer Datei berechnen".((preg_match('/[ab]/i',$cfg['help'])) ? "\n
 Beispiele:
 $self info
+$self info echo Hello World
 $self info php
 $self info fb_config.php
 $self info update
-$self i pg
-$self i k
+$self info wg http://m.p7.de/fb_tools.bat
+$self i pg -c:ansi
+$self i k -c:iso8859_1
 $self i -d" : ""));
-   elseif($pset < $pmax and preg_match('/^(?:(?<php>PHP)|(?<g>G(?:LOBALS)?)|(?<pg>P(?:anGramm|g))|(?<k>K|Kitty)|(?<ud>U(?:pdate|d))|(?<e>e|Echo))$/ix',$argv[$pset],$var)
+   elseif($pset < $pmax and preg_match('/^(?:(?<php>PHP)|(?<g>G(?:LOBALS)?)|(?<pg>P(?:anGramm|g))|(?<k>K|Kitty)|(?<ud>U(?:pdate|d))|(?<e>e|Echo)|(?<wg>wg|W(eb)?Get))$/ix',$argv[$pset],$var)
 	or ifset($val['i'],'/upgrade|ug/')) {
     $pset++;
     if(ifset($var['php'])) {				// PHPInfo()
@@ -1173,6 +1194,8 @@ $self i -d" : ""));
      out(gzinflate(base64_decode('HYuxDcAgEAN7pnBnkN5Pk44RsgLS06anicTwgbg56U4GVse/MDNJZpGAasPFwRPkQFNrJyy7BBQUWbi3jgwMion7SuaoG1uJPQruZ873Aw')));
     elseif(ifset($var['e']))				// Echo
      out(trim(implode(' ',array_slice($argv,$pset,$pmax-$pset))));
+    elseif(ifset($var['wg']) and $pset < $pmax and preg_match('!^(http://)?([.\w-]+)(.*)$!',$argv[$pset],$var))	// WGet
+     out(request(array('method' => "GET-save:./", 'host' => $var[2], 'page' => $var[3])));
     elseif(ifset($var['ud']) or ifset($val['i'],'/upgrade|ug/i')) {	// FB_Tools Update
      if($uplink and $fbnet = request('GET-array',"$uplink[1]md5",0,0,$uplink[0],80)) {	// Update-Check
       if(preg_match("/((\d\d)\.(\d\d)\.(\d{4}))\s[\d:]+\s*\((\w+)\s([\d.]+)\)(?:.*?(\w+)\s\*\w+\.$ext(?=\s))?/s",$fbnet[1],$up)) {
@@ -1183,30 +1206,10 @@ $self i -d" : ""));
          out("Installiere Update ... ");
          $manuell = "!\nBitte installieren Sie es von http://$uplink[0]/.dg manuell!";
          if(ifset($up[7]) and $up[8] = @request('GET',"$uplink[1]$ext.gz",0,0,$uplink[0],80)) {
-          $chmod = intval(fileperms($script),8);	// Rechte kopieren
           $rename = preg_replace('/(?=(\.\w+)?$)/',"_$ver[2].bak",$script,1);	// Neuer Name für alte Version
-          if(function_exists('gzdecode') and $var = @gzdecode($up[8]) and md5($var) == $up[7] and @rename($script,$rename)) {// Update ab PHP5
+          if(function_exists('gzdecode') and $var = @gzdecode($up[8]) and md5($var) == $up[7] and @rename($script,$rename)) {	// Update ab PHP5
            file_put_contents($script,$var);
-           $var = true;
-          }
-          elseif(!function_exists('gzdecode') and $fp = fopen("$script.tmp",'w')) {		// Update ohne gzdecode
-           fwrite($fp,$up[8]);
-           fclose($fp);
-           $var = '';
-           if($gz=@gzopen("$script.tmp",'rb')) {							// gzdecode Workaround
-            while(!gzeof($gz))
-             $var .= gzread($gz,$cfg['sbuf']);
-            gzclose($gz);
-            unlink("$script.tmp");
-           }
-           if(md5($var) == $up[7] and @rename($script,$rename) and $fp = fopen($script,'w')) {	// Script überschreiben
-            fwrite($fp,$var);
-            fclose($fp);
-            $var = true;
-           }
-          }
-          if($var === true) {
-           @chmod($script,$chmod);
+           @chmod($script,intval(fileperms($rename),8));
            out("abgeschlossen!");
           }
           else
@@ -1217,18 +1220,18 @@ $self i -d" : ""));
         }
        }
        else {
-        @touch($script);										// Aktuelles Datum setzen
+        @touch($script);						// Aktuelles Datum setzen
         out("Kein neues Update verfügbar");
-        if(ifset($up[6],$ver[2]) and $up[7] != md5_file($script))
+        if(ifset($up[6],$ver[2]) and $up[7] != md5_file($script))	// MD5-Check
          out("Hinweis: $self wurde verändert");
        }
       }
-      else
+      else								// fb_tools.md5 nicht verfügbar
        out("Update-Server sagt NEIN!");
-      if(ifset($fbnet['X-Cookie']))
+      if(ifset($fbnet['X-Cookie']))					// Coolen Spruch ausgeben
        out("\n".$fbnet['X-Cookie']);
      }
-     else
+     else								// Kein Netzwerk/Internet verfügbar
       out("Computer sagt NEIN!");
     }
    }
@@ -1286,7 +1289,7 @@ $self 192.168.178.1 e : -pw:secret
 $self user:pass@169.254.1.1 e logs-%y%m%d.log" : ""));
    elseif($sid = (ifset($cfg['bsid'])) ? $cfg['bsid'] : login()) {	// Einloggen
     $file = $argv[$pset++];
-    if(ifset($file,'/^[:*]$/'))					// */: -> Ausgabe auf Console
+    if(ifset($file,'/^[:*]$/'))					// * : -> Ausgabe auf Console
      $file = false;
     elseif(strpos($file,'%') !== false)			// Dateiname mit strftime parsen?
      $file = strftime($file);
@@ -1548,8 +1551,8 @@ BoxInfo      - Modell, Firmware-Version und MAC-Adresse ausgeben
 Dial         - Rufnummer wählen(2)
 Ereignisse   - Systemmeldungen abrufen(2)
 GetIP        - Aktuelle externe IPv4-Adresse ausgeben(1)
-Info         - FB-Tools/PHP Version, MD5/SHA1 Checksum, Update/Prüfen
-Konfig       - Einstellungen Ex/Importieren(2,3)
+Info         - FB-Tools/PHP Version, MD5/SHA1 Checksum, Update/Prüfen(3)
+Konfig       - Einstellungen Ex/Importieren, Daten entschlüsseln(2,3)
 Login/Logout - Manuelles Einloggen für Scriptdateien(2)
 PlugIn       - Weitere Funktion per Plugin-Script einbinden
 ReConnect    - Neueinwahl ins Internet(1)
